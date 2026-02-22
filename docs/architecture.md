@@ -48,4 +48,6 @@
 
 - Rendered pages under `public/`.
 - Islands runtime at `public/_nanoss/islands-runtime.js`.
+  - Exposes `window.NanossIslands.register(name, handler)` and `window.NanossIslands.hydrate()`.
+  - Island nodes are emitted as `<div data-island="..." data-props='...'></div>` and hydrated by registered handlers.
 - Semantic index at `public/search/semantic-index.json` when enabled.

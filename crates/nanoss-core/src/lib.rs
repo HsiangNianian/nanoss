@@ -1007,17 +1007,68 @@ fn write_islands_runtime(output_root: &Path) -> Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create islands runtime parent {}", parent.display()))?;
     }
-    let runtime = r#"const islands = document.querySelectorAll('[data-island]');
-for (const node of islands) {
-  const name = node.getAttribute('data-island');
-  const raw = node.getAttribute('data-props') || '{}';
-  let props = {};
-  try {
-    props = JSON.parse(raw);
-  } catch {
-    props = {};
-  }
-  node.textContent = `[island:${name}] hydrated with props ${JSON.stringify(props)}`;
+        let runtime = r#"const registry = new Map();
+
+function parseProps(node) {
+    const raw = node.getAttribute('data-props') || '{}';
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return {};
+    }
+}
+
+function mountNode(node) {
+    const name = node.getAttribute('data-island');
+    if (!name) return;
+
+    const handler = registry.get(name);
+    if (!handler) {
+        node.setAttribute('data-island-pending', 'true');
+        return;
+    }
+
+    const props = parseProps(node);
+    handler(node, props);
+    node.removeAttribute('data-island-pending');
+    node.setAttribute('data-island-hydrated', 'true');
+}
+
+function hydrate(targetName) {
+    const nodes = document.querySelectorAll('[data-island]');
+    for (const node of nodes) {
+        const current = node.getAttribute('data-island');
+        if (!targetName || current === targetName) {
+            mountNode(node);
+        }
+    }
+}
+
+const api = {
+    register(name, handler) {
+        if (typeof name !== 'string' || !name) {
+            throw new Error('NanossIslands.register(name, handler): name must be non-empty string');
+        }
+        if (typeof handler !== 'function') {
+            throw new Error('NanossIslands.register(name, handler): handler must be function');
+        }
+        registry.set(name, handler);
+        hydrate(name);
+    },
+    hydrate,
+};
+
+if (!window.NanossIslands) {
+    window.NanossIslands = api;
+} else {
+    window.NanossIslands.register = api.register;
+    window.NanossIslands.hydrate = api.hydrate;
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => hydrate());
+} else {
+    hydrate();
 }
 "#;
     fs::write(&runtime_path, runtime)
@@ -1891,6 +1942,27 @@ mod tests {
         assert!(posts_html.contains("theme-marker"));
         assert!(tags_html.contains("theme-marker"));
         assert!(categories_html.contains("theme-marker"));
+        Ok(())
+    }
+
+    #[test]
+    fn compile_islands_injects_runtime_script() {
+        let (html, has_islands) =
+            compile_islands(r#"<p>x</p><island name="counter" props='{"step":1}'></island>"#);
+        assert!(has_islands);
+        assert!(html.contains("data-island=\"counter\""));
+        assert!(html.contains("/_nanoss/islands-runtime.js"));
+    }
+
+    #[test]
+    fn islands_runtime_exposes_register_api() -> Result<()> {
+        let out = tempdir().context("failed to create output dir")?;
+        write_islands_runtime(out.path())?;
+        let runtime = fs::read_to_string(out.path().join("_nanoss/islands-runtime.js"))
+            .context("failed to read islands runtime")?;
+        assert!(runtime.contains("window.NanossIslands"));
+        assert!(runtime.contains("register(name, handler)"));
+        assert!(runtime.contains("hydrate(targetName)"));
         Ok(())
     }
 
