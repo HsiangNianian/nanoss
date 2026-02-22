@@ -18,6 +18,7 @@ enabled = ["demo-plugin"]
 
 ## Notes
 
+- `nanoss init` / `nanoss new site <name>` generate a starter `nanoss.toml` by default.
 - `build.base_path` is used to rewrite absolute site links (`/foo`) for subpath deploys.
 - `build.site_domain` is optional. When set, sitemap/RSS links become absolute URLs.
 - Priority is: CLI flag > `nanoss.toml` > default.

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -30,6 +30,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Build(BuildArgs),
+    Init(InitArgs),
+    New(NewArgs),
     Dev(ServerArgs),
     Server(ServerArgs),
     Deploy(DeployArgs),
@@ -106,6 +108,27 @@ struct GenerateCiArgs {
     provider: CiProviderArg,
     #[arg(long, default_value = "public")]
     output_dir: PathBuf,
+}
+
+#[derive(Args)]
+struct InitArgs {
+    #[arg(long, default_value = ".")]
+    dir: PathBuf,
+}
+
+#[derive(Args)]
+struct NewArgs {
+    #[command(subcommand)]
+    kind: Option<NewCommand>,
+    name: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum NewCommand {
+    Site { name: String },
+    Theme { name: String },
+    Page { path: String },
+    Plugin { name: String },
 }
 
 #[derive(Subcommand)]
@@ -211,6 +234,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Build(args) => run_build(&args),
+        Command::Init(args) => run_init(args),
+        Command::New(args) => run_new(args),
         Command::Dev(mut args) => {
             args.watch = true;
             run_server(args)
@@ -221,6 +246,72 @@ fn main() -> Result<()> {
         Command::Plugin { command } => run_plugin(command),
         Command::Theme { command } => run_theme(command),
     }
+}
+
+fn run_init(args: InitArgs) -> Result<()> {
+    create_site_scaffold(&args.dir)?;
+    println!("Initialized Nanoss starter at {}", args.dir.display());
+    Ok(())
+}
+
+fn run_new(args: NewArgs) -> Result<()> {
+    match (args.kind, args.name) {
+        (Some(NewCommand::Site { name }), None) => create_site_scaffold(Path::new(&name)),
+        (Some(NewCommand::Theme { name }), None) => create_theme_scaffold(&name),
+        (Some(NewCommand::Page { path }), None) => create_page_scaffold(&path),
+        (Some(NewCommand::Plugin { name }), None) => create_plugin_scaffold(Path::new("plugins"), &name),
+        (None, Some(name)) => {
+            let selected = prompt_new_kind(&name, io::stdin().lock(), io::stdout())?;
+            match selected {
+                NewKind::Site => create_site_scaffold(Path::new(&name)),
+                NewKind::Theme => create_theme_scaffold(&name),
+                NewKind::Page => create_page_scaffold(&name),
+                NewKind::Plugin => create_plugin_scaffold(Path::new("plugins"), &name),
+            }
+        }
+        (None, None) => bail!("usage: nanoss new <name> or nanoss new <site|theme|page|plugin> <value>"),
+        _ => bail!("when using explicit new type, do not pass extra unnamed args"),
+    }?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NewKind {
+    Site,
+    Theme,
+    Page,
+    Plugin,
+}
+
+fn prompt_new_kind<R: BufRead, W: Write>(name: &str, mut input: R, mut output: W) -> Result<NewKind> {
+    writeln!(
+        output,
+        "Select type for '{}':\n  1) site\n  2) theme\n  3) page\n  4) plugin",
+        name
+    )
+    .context("failed to write prompt")?;
+    write!(output, "Enter choice [1-4]: ").context("failed to write prompt")?;
+    output.flush().context("failed to flush prompt")?;
+
+    for _ in 0..3 {
+        let mut line = String::new();
+        input.read_line(&mut line).context("failed to read selection")?;
+        let choice = line.trim().to_ascii_lowercase();
+        let selected = match choice.as_str() {
+            "1" | "site" => Some(NewKind::Site),
+            "2" | "theme" => Some(NewKind::Theme),
+            "3" | "page" => Some(NewKind::Page),
+            "4" | "plugin" => Some(NewKind::Plugin),
+            _ => None,
+        };
+        if let Some(kind) = selected {
+            return Ok(kind);
+        }
+        writeln!(output, "invalid choice, please enter 1/2/3/4").context("failed to write prompt")?;
+        write!(output, "Enter choice [1-4]: ").context("failed to write prompt")?;
+        output.flush().context("failed to flush prompt")?;
+    }
+    bail!("too many invalid selections")
 }
 
 fn run_build(args: &BuildArgs) -> Result<()> {
@@ -464,23 +555,7 @@ fn run_theme(command: ThemeCommand) -> Result<()> {
             }
         }
         ThemeCommand::New { name } => {
-            let dir = theme_dir_for(&name);
-            if dir.exists() {
-                bail!("theme already exists: {}", dir.display());
-            }
-            fs::create_dir_all(dir.join("templates")).context("failed to create theme template dir")?;
-            fs::create_dir_all(dir.join("static")).context("failed to create theme static dir")?;
-            fs::write(
-                dir.join("theme.toml"),
-                format!("name = \"{}\"\nversion = \"0.1.0\"\n", name),
-            )
-            .context("failed to write theme.toml")?;
-            fs::write(
-                dir.join("templates/page.html"),
-                "<!doctype html><html><head><meta charset=\"utf-8\" /><title>{{ title }}</title></head><body>{{ content | safe }}</body></html>\n",
-            )
-            .context("failed to write theme template")?;
-            println!("Created theme at {}", dir.display());
+            create_theme_scaffold(&name)?;
         }
         ThemeCommand::Use { name } => {
             let dir = theme_dir_for(&name);
@@ -497,6 +572,263 @@ fn run_theme(command: ThemeCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn create_site_scaffold(root: &Path) -> Result<()> {
+    fs::create_dir_all(root).with_context(|| format!("failed to create {}", root.display()))?;
+    create_if_missing(
+        &root.join(PROJECT_CONFIG_FILE),
+        "[build]\nbase_path = \"/\"\n# site_domain = \"https://example.com\"\n",
+    )?;
+    create_if_missing(
+        &root.join("content/index.md"),
+        "---\ntitle: Home\n---\n\n# Welcome to Nanoss\n\nThis site is scaffolded by `nanoss init/new`.\n",
+    )?;
+    create_if_missing(&root.join("content/styles/site.css"), starter_site_css())?;
+    create_if_missing(
+        &root.join("content/scripts/site.js"),
+        "console.log(\"nanoss starter loaded\");\n",
+    )?;
+    create_if_missing(&root.join("static/.gitkeep"), "")?;
+    create_if_missing(&root.join("templates/page.html"), starter_page_template())?;
+    Ok(())
+}
+
+fn create_theme_scaffold(name: &str) -> Result<()> {
+    let dir = theme_dir_for(name);
+    fs::create_dir_all(dir.join("templates")).context("failed to create theme template dir")?;
+    fs::create_dir_all(dir.join("static")).context("failed to create theme static dir")?;
+    create_if_missing(
+        &dir.join("theme.toml"),
+        &format!("name = \"{}\"\nversion = \"0.1.0\"\n", name),
+    )?;
+    create_if_missing(&dir.join("templates/page.html"), starter_theme_template())?;
+    create_if_missing(&dir.join("static/theme.css"), starter_theme_css())?;
+    create_if_missing(&dir.join("static/.gitkeep"), "")?;
+    println!("Created theme at {}", dir.display());
+    Ok(())
+}
+
+fn create_page_scaffold(path: &str) -> Result<()> {
+    let mut rel = PathBuf::from(path);
+    if rel.extension().is_none() {
+        rel.set_extension("md");
+    }
+    let target = PathBuf::from("content").join(&rel);
+    let stem = rel
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("new-page")
+        .to_string();
+    let title = stem.replace('-', " ");
+    let body = format!(
+        "---\ntitle: {}\nslug: {}\n---\n\n# {}\n\nWrite your content here.\n",
+        title, stem, title
+    );
+    create_if_missing(&target, &body)?;
+    println!("Created page {}", target.display());
+    Ok(())
+}
+
+fn create_plugin_scaffold(root: &Path, name: &str) -> Result<()> {
+    let dir = root.join(name);
+    fs::create_dir_all(dir.join("src")).with_context(|| format!("failed to create {}", dir.display()))?;
+    let crate_name = format!("nanoss-plugin-{}", name.replace('-', "_"));
+    create_if_missing(
+        &dir.join("Cargo.toml"),
+        &format!(
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
+            crate_name
+        ),
+    )?;
+    create_if_missing(
+        &dir.join("src/lib.rs"),
+        "//! Minimal Nanoss plugin scaffold.\n// TODO: implement exports based on nanoss plugin WIT bindings.\n",
+    )?;
+    create_if_missing(
+        &dir.join("README.md"),
+        "# Nanoss Plugin Scaffold\n\nBuild this crate for wasm32 and install with `nanoss plugin install`.\n",
+    )?;
+    println!("Created plugin scaffold {}", dir.display());
+    Ok(())
+}
+
+fn create_if_missing(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        println!("skip existing {}", path.display());
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn starter_page_template() -> &'static str {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ base_href_prefix }}/styles/site.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container brand">Nanoss</div>
+  </header>
+  <main class="container layout">
+    {% if toc %}
+    <aside class="toc-card" aria-label="Table of contents">
+      <h2>On this page</h2>
+      {{ toc | safe }}
+    </aside>
+    {% endif %}
+    <article class="content-card">
+      {{ content | safe }}
+    </article>
+  </main>
+  <script src="{{ base_href_prefix }}/scripts/site.js"></script>
+</body>
+</html>
+"#
+}
+
+fn starter_site_css() -> &'static str {
+    r#":root {
+  --bg: #0b1020;
+  --panel: #111936;
+  --panel-2: #162345;
+  --text: #e8ecf8;
+  --muted: #98a2b3;
+  --accent: #7dd3fc;
+  --line: #26314f;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: radial-gradient(circle at 20% 0%, #101a38 0%, var(--bg) 45%);
+  color: var(--text);
+}
+
+.container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+.topbar {
+  border-bottom: 1px solid var(--line);
+  background: rgba(11, 16, 32, 0.7);
+  backdrop-filter: blur(6px);
+}
+.brand { font-weight: 700; padding: 16px 20px; letter-spacing: 0.2px; }
+
+.layout {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  padding-top: 22px;
+  padding-bottom: 36px;
+}
+.toc-card, .content-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.toc-card { padding: 14px 16px; position: sticky; top: 16px; height: fit-content; }
+.toc-card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+.content-card { padding: 20px 24px; min-height: 70vh; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+pre {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  background: #0b1329;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .toc-card { position: static; }
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f7fb;
+    --panel: #ffffff;
+    --panel-2: #ffffff;
+    --text: #0f172a;
+    --muted: #475569;
+    --accent: #0369a1;
+    --line: #dbe4f0;
+  }
+  body {
+    background: linear-gradient(180deg, #f7fbff 0%, var(--bg) 38%);
+  }
+  .topbar {
+    background: rgba(255, 255, 255, 0.75);
+  }
+  pre {
+    background: #f8fafc;
+  }
+}
+"#
+}
+
+fn starter_theme_template() -> &'static str {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ base_href_prefix }}/theme.css" />
+</head>
+<body>
+  <main class="container">
+    {% if toc %}
+    <nav class="toc">{{ toc | safe }}</nav>
+    {% endif %}
+    <article class="content">{{ content | safe }}</article>
+  </main>
+</body>
+</html>
+"#
+}
+
+fn starter_theme_css() -> &'static str {
+    r#":root { color-scheme: dark light; }
+body {
+  margin: 0;
+  background: #0f172a;
+  color: #e5e7eb;
+  font-family: Inter, system-ui, sans-serif;
+}
+.container { max-width: 900px; margin: 0 auto; padding: 28px 20px 48px; }
+.toc, .content {
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: #111827;
+}
+.toc { padding: 12px 14px; margin-bottom: 14px; }
+.content { padding: 20px; }
+a { color: #7dd3fc; }
+pre { overflow-x: auto; background: #0b1222; border-radius: 10px; padding: 12px; }
+
+@media (prefers-color-scheme: light) {
+  body {
+    background: #f8fafc;
+    color: #0f172a;
+  }
+  .toc, .content {
+    border-color: #dbe4f0;
+    background: #ffffff;
+  }
+  a { color: #0369a1; }
+  pre { background: #f1f5f9; }
+}
+"#
 }
 
 fn ensure_plugin_compatible(entry: &PluginRegistryEntry) -> Result<()> {
@@ -674,6 +1006,7 @@ fn handle_static_request(request: tiny_http::Request, output_dir: &Path) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
@@ -693,6 +1026,27 @@ mod tests {
         let run = f();
         std::env::set_current_dir(current).context("failed to restore cwd")?;
         run
+    }
+
+    fn default_build_args() -> BuildArgs {
+        BuildArgs {
+            content_dir: PathBuf::from("content"),
+            output_dir: PathBuf::from("public"),
+            template_dir: Some(PathBuf::from("templates")),
+            theme: None,
+            check_external_links: false,
+            fail_on_broken_links: false,
+            plugin_paths: Vec::new(),
+            js_backend: JsBackendArg::Passthrough,
+            tailwind_input: None,
+            tailwind_output: None,
+            tailwind_bin: "tailwindcss".to_string(),
+            tailwind_minify: true,
+            tailwind_backend: TailwindBackendArg::Standalone,
+            enable_ai_index: false,
+            base_path: Some("/".to_string()),
+            site_domain: None,
+        }
     }
 
     #[test]
@@ -735,6 +1089,84 @@ mod tests {
             assert!(workflow.exists());
             let raw = fs::read_to_string(&workflow).context("failed to read generated workflow")?;
             assert!(raw.contains("cargo run -p nanoss-cli -- build"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn init_creates_starter_and_is_idempotent() -> Result<()> {
+        with_temp_cwd(|| {
+            run_init(InitArgs {
+                dir: PathBuf::from("."),
+            })?;
+            run_init(InitArgs {
+                dir: PathBuf::from("."),
+            })?;
+            assert!(PathBuf::from("nanoss.toml").exists());
+            assert!(PathBuf::from("content/index.md").exists());
+            assert!(PathBuf::from("templates/page.html").exists());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn new_subcommands_create_expected_scaffold() -> Result<()> {
+        with_temp_cwd(|| {
+            run_new(NewArgs {
+                kind: Some(NewCommand::Site {
+                    name: "demo-site".to_string(),
+                }),
+                name: None,
+            })?;
+            assert!(PathBuf::from("demo-site/nanoss.toml").exists());
+
+            run_new(NewArgs {
+                kind: Some(NewCommand::Theme {
+                    name: "demo-theme".to_string(),
+                }),
+                name: None,
+            })?;
+            assert!(PathBuf::from(".nanoss/themes/demo-theme/theme.toml").exists());
+
+            run_new(NewArgs {
+                kind: Some(NewCommand::Page {
+                    path: "guide/getting-started".to_string(),
+                }),
+                name: None,
+            })?;
+            assert!(PathBuf::from("content/guide/getting-started.md").exists());
+
+            run_new(NewArgs {
+                kind: Some(NewCommand::Plugin {
+                    name: "demo-plugin".to_string(),
+                }),
+                name: None,
+            })?;
+            assert!(PathBuf::from("plugins/demo-plugin/Cargo.toml").exists());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn prompt_new_kind_accepts_numeric_and_text() -> Result<()> {
+        let mut out = Vec::new();
+        let kind = prompt_new_kind("demo", Cursor::new("2\n"), &mut out)?;
+        assert!(matches!(kind, NewKind::Theme));
+
+        let mut out = Vec::new();
+        let kind = prompt_new_kind("demo", Cursor::new("plugin\n"), &mut out)?;
+        assert!(matches!(kind, NewKind::Plugin));
+        Ok(())
+    }
+
+    #[test]
+    fn init_then_build_succeeds() -> Result<()> {
+        with_temp_cwd(|| {
+            run_init(InitArgs {
+                dir: PathBuf::from("."),
+            })?;
+            run_build(&default_build_args())?;
+            assert!(PathBuf::from("public/index.html").exists());
             Ok(())
         })
     }

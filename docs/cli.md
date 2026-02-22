@@ -1,5 +1,27 @@
 # CLI Extensions
 
+## `nanoss init`
+
+Initialize a full starter project in the current directory (or custom dir).
+
+```bash
+nanoss init
+nanoss init --dir my-site
+```
+
+## `nanoss new`
+
+Create scaffold resources.
+
+```bash
+nanoss new site my-site
+nanoss new theme my-theme
+nanoss new page docs/getting-started
+nanoss new plugin my-plugin
+```
+
+If you run `nanoss new <name>`, Nanoss enters interactive mode and lets you choose `site/theme/page/plugin`.
+
 ## `nanoss server`
 
 Serve the generated site locally and optionally watch for source changes.
