@@ -1,8 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -13,6 +14,7 @@ use nanoss_query::{combine_fingerprints, content_hash, QueryDb, SourceFile};
 use once_cell::sync::Lazy;
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
+use rayon::prelude::*;
 use rswind::create_processor;
 use reqwest::blocking::Client;
 use reqwest::{Method, StatusCode};
@@ -59,6 +61,7 @@ static MD_LINK_RE: Lazy<Regex> = Lazy::new(|| {
 static HTML_ASSET_ATTR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?:src|href)=["']([^"']+)["']"#).expect("valid html attr regex"));
 const BUILD_CACHE_FILE: &str = ".nanoss-cache.json";
+const BUILD_CACHE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -74,6 +77,10 @@ pub struct BuildConfig {
     pub js_backend: JsBackend,
     pub tailwind: Option<TailwindConfig>,
     pub enable_ai_index: bool,
+    pub max_frontmatter_bytes: usize,
+    pub max_file_bytes: u64,
+    pub max_total_files: usize,
+    pub command_timeout_secs: u64,
 }
 
 #[derive(Debug, Default)]
@@ -116,6 +123,9 @@ struct FrontMatter {
     title: Option<String>,
     slug: Option<String>,
     lang: Option<String>,
+    date: Option<String>,
+    tags: Option<Vec<String>>,
+    categories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -125,15 +135,40 @@ struct PageIr {
     toc_html: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BuildCache {
+    #[serde(default = "default_cache_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
     pages: HashMap<String, CachePageRecord>,
+    #[serde(default)]
+    assets: HashMap<String, CacheAssetRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachePageRecord {
     hash: String,
     output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheAssetRecord {
+    hash: String,
+    output: String,
+}
+
+impl Default for BuildCache {
+    fn default() -> Self {
+        Self {
+            schema_version: BUILD_CACHE_SCHEMA_VERSION,
+            pages: HashMap::new(),
+            assets: HashMap::new(),
+        }
+    }
+}
+
+fn default_cache_schema_version() -> u32 {
+    BUILD_CACHE_SCHEMA_VERSION
 }
 
 #[derive(Debug, Serialize)]
@@ -143,7 +178,17 @@ struct SemanticIndexDoc {
     embedding: Vec<f32>,
 }
 
+#[derive(Debug, Clone)]
+struct ContentEntry {
+    title: String,
+    url: String,
+    date: Option<String>,
+    tags: Vec<String>,
+    categories: Vec<String>,
+}
+
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
+    validate_build_config(config)?;
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
 
@@ -161,24 +206,46 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 
     let mut report = BuildReport::default();
     let query_db = QueryDb::default();
+    let data_context = load_data_context(&config.content_dir)?;
     let cache_path = config.output_dir.join(BUILD_CACHE_FILE);
     let mut build_cache = load_build_cache(&cache_path)?;
     let template_hash = compute_template_dependency_hash(&query_db, config.template_dir.as_deref())?;
     if let Some(tailwind) = &config.tailwind {
-        run_tailwind(tailwind, &config.content_dir)?;
+        run_tailwind(tailwind, &config.content_dir, config.command_timeout_secs)?;
         report.compiled_tailwind = true;
     }
     copy_theme_static_assets(config.theme_dir.as_deref(), &config.output_dir)?;
 
     let mut islands_runtime_written = false;
+    let mut file_count = 0usize;
     for entry in WalkDir::new(&config.content_dir).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() {
             continue;
+        }
+        file_count += 1;
+        if file_count > config.max_total_files {
+            bail!(
+                "file count exceeds configured limit: {} > {}",
+                file_count,
+                config.max_total_files
+            );
+        }
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("failed to read file metadata {}", entry.path().display()))?;
+        if metadata.len() > config.max_file_bytes {
+            bail!(
+                "file exceeds configured size limit ({} bytes): {}",
+                config.max_file_bytes,
+                entry.path().display()
+            );
         }
         match entry.path().extension().and_then(OsStr::to_str) {
             Some("md") => {
                 let raw = fs::read_to_string(entry.path())
                     .with_context(|| format!("failed to read markdown file {}", entry.path().display()))?;
+                validate_frontmatter_size(&raw, config.max_frontmatter_bytes)
+                    .with_context(|| format!("frontmatter too large in {}", entry.path().display()))?;
                 let current_hash = compute_page_build_hash(
                     &query_db,
                     entry.path(),
@@ -195,7 +262,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     }
                 }
 
-                let rendered = render_markdown_file(entry.path(), &env, &plugin_host)?;
+                let rendered = render_markdown_file(entry.path(), &env, &plugin_host, &data_context)?;
                 let target =
                     output_path_for(
                         entry.path(),
@@ -228,19 +295,99 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 report.rendered_pages += 1;
             }
             Some("scss") | Some("sass") => {
-                compile_sass_file(entry.path(), &config.content_dir, &config.output_dir)?;
+                let hash = hashed_file_content(entry.path());
+                let cache_key = entry.path().display().to_string();
+                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, Some("css"))?;
+                if let Some(record) = build_cache.assets.get(&cache_key) {
+                    if record.hash == hash && PathBuf::from(&record.output).exists() {
+                        continue;
+                    }
+                }
+                compile_sass_file(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    config.command_timeout_secs,
+                )?;
+                build_cache.assets.insert(
+                    cache_key,
+                    CacheAssetRecord {
+                        hash,
+                        output: target.display().to_string(),
+                    },
+                );
                 report.compiled_sass += 1;
             }
             Some("css") => {
+                let hash = hashed_file_content(entry.path());
+                let cache_key = entry.path().display().to_string();
+                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                if let Some(record) = build_cache.assets.get(&cache_key) {
+                    if record.hash == hash && PathBuf::from(&record.output).exists() {
+                        continue;
+                    }
+                }
                 process_css_asset(entry.path(), &config.content_dir, &config.output_dir)?;
+                build_cache.assets.insert(
+                    cache_key,
+                    CacheAssetRecord {
+                        hash,
+                        output: target.display().to_string(),
+                    },
+                );
                 report.copied_assets += 1;
             }
             Some("js") | Some("mjs") | Some("cjs") | Some("ts") => {
-                process_script_asset(entry.path(), &config.content_dir, &config.output_dir, config.js_backend)?;
+                let hash = hashed_file_content(entry.path());
+                let cache_key = entry.path().display().to_string();
+                let target = asset_output_path(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    if entry.path().extension().and_then(OsStr::to_str) == Some("ts") {
+                        Some("js")
+                    } else {
+                        None
+                    },
+                )?;
+                if let Some(record) = build_cache.assets.get(&cache_key) {
+                    if record.hash == hash && PathBuf::from(&record.output).exists() {
+                        continue;
+                    }
+                }
+                process_script_asset(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    config.js_backend,
+                    config.command_timeout_secs,
+                )?;
+                build_cache.assets.insert(
+                    cache_key,
+                    CacheAssetRecord {
+                        hash,
+                        output: target.display().to_string(),
+                    },
+                );
                 report.processed_scripts += 1;
             }
             _ => {
+                let hash = hashed_file_content(entry.path());
+                let cache_key = entry.path().display().to_string();
+                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                if let Some(record) = build_cache.assets.get(&cache_key) {
+                    if record.hash == hash && PathBuf::from(&record.output).exists() {
+                        continue;
+                    }
+                }
                 copy_asset_file(entry.path(), &config.content_dir, &config.output_dir)?;
+                build_cache.assets.insert(
+                    cache_key,
+                    CacheAssetRecord {
+                        hash,
+                        output: target.display().to_string(),
+                    },
+                );
                 report.copied_assets += 1;
             }
         }
@@ -258,6 +405,10 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     if config.enable_ai_index {
         report.ai_indexed_pages = build_semantic_index(&config.content_dir, &config.output_dir)?;
     }
+
+    let entries = collect_content_entries(&config.content_dir, &config.output_dir)?;
+    generate_content_organization_outputs(&entries, &config.output_dir)?;
+    generate_sitemap_and_feed(&entries, &config.output_dir)?;
 
     plugin_host.shutdown()?;
     save_build_cache(&cache_path, &build_cache)?;
@@ -278,7 +429,12 @@ struct TocItem {
     text: String,
 }
 
-fn render_markdown_file(path: &Path, env: &Environment<'_>, plugin_host: &PluginHost) -> Result<RenderedPage> {
+fn render_markdown_file(
+    path: &Path,
+    env: &Environment<'_>,
+    plugin_host: &PluginHost,
+    data_context: &serde_json::Value,
+) -> Result<RenderedPage> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read markdown file {}", path.display()))?;
     let transformed_raw = plugin_host
@@ -310,7 +466,8 @@ fn render_markdown_file(path: &Path, env: &Environment<'_>, plugin_host: &Plugin
         .render(context! {
             title => transformed_ir.title,
             content => transformed_ir.content_html,
-            toc => transformed_ir.toc_html
+            toc => transformed_ir.toc_html,
+            data => data_context
         })
         .context("failed to render page template")?;
     let html = plugin_host
@@ -474,11 +631,15 @@ fn output_path_for(
     lang: Option<&str>,
 ) -> Result<PathBuf> {
     if let Some(slug) = slug {
+        validate_route_segment(slug, "slug")?;
         let mut base = output_root.to_path_buf();
         if let Some(lang) = lang {
+            validate_route_segment(lang, "lang")?;
             base = base.join(lang);
         }
-        return Ok(base.join(slug).join("index.html"));
+        let candidate = base.join(slug).join("index.html");
+        ensure_inside_output(output_root, &candidate)?;
+        return Ok(candidate);
     }
 
     let rel = source
@@ -486,14 +647,16 @@ fn output_path_for(
         .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
     let mut target = output_root.to_path_buf();
     if let Some(lang) = lang {
+        validate_route_segment(lang, "lang")?;
         target = target.join(lang);
     }
     target = target.join(rel);
     target.set_extension("html");
+    ensure_inside_output(output_root, &target)?;
     Ok(target)
 }
 
-fn compile_sass_file(source: &Path, content_root: &Path, output_root: &Path) -> Result<()> {
+fn compile_sass_file(source: &Path, content_root: &Path, output_root: &Path, _timeout_secs: u64) -> Result<()> {
     let rel = source
         .strip_prefix(content_root)
         .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
@@ -543,7 +706,13 @@ fn copy_asset_file(source: &Path, content_root: &Path, output_root: &Path) -> Re
     Ok(())
 }
 
-fn process_script_asset(source: &Path, content_root: &Path, output_root: &Path, backend: JsBackend) -> Result<()> {
+fn process_script_asset(
+    source: &Path,
+    content_root: &Path,
+    output_root: &Path,
+    backend: JsBackend,
+    timeout_secs: u64,
+) -> Result<()> {
     let rel = source
         .strip_prefix(content_root)
         .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
@@ -562,14 +731,20 @@ fn process_script_asset(source: &Path, content_root: &Path, output_root: &Path, 
                 .with_context(|| format!("failed to copy script {} -> {}", source.display(), target.display()))?;
         }
         JsBackend::Esbuild => {
-            let status = Command::new("esbuild")
+            ensure_binary_name_safe("esbuild")?;
+            let mut cmd = Command::new("esbuild");
+            let mut child = cmd
                 .arg(source)
                 .arg("--bundle")
                 .arg("--minify")
                 .arg("--outfile")
                 .arg(&target)
-                .status()
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
                 .with_context(|| format!("failed to execute esbuild for {}", source.display()))?;
+            let status = wait_child_with_timeout(&mut child, timeout_secs)
+                .with_context(|| format!("esbuild timeout for {}", source.display()))?;
             if !status.success() {
                 bail!("esbuild failed for {}", source.display());
             }
@@ -578,14 +753,15 @@ fn process_script_asset(source: &Path, content_root: &Path, output_root: &Path, 
     Ok(())
 }
 
-fn run_tailwind(config: &TailwindConfig, content_dir: &Path) -> Result<()> {
+fn run_tailwind(config: &TailwindConfig, content_dir: &Path, timeout_secs: u64) -> Result<()> {
     match config.backend {
-        TailwindBackend::Standalone => run_tailwind_standalone(config),
+        TailwindBackend::Standalone => run_tailwind_standalone(config, timeout_secs),
         TailwindBackend::Rswind => run_tailwind_rswind(config, content_dir),
     }
 }
 
-fn run_tailwind_standalone(config: &TailwindConfig) -> Result<()> {
+fn run_tailwind_standalone(config: &TailwindConfig, timeout_secs: u64) -> Result<()> {
+    ensure_binary_name_safe(&config.binary)?;
     if let Some(parent) = config.output_css.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
@@ -598,9 +774,13 @@ fn run_tailwind_standalone(config: &TailwindConfig) -> Result<()> {
     if config.minify {
         cmd.arg("--minify");
     }
-    let status = cmd
-        .status()
+    let mut child = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to execute {}", config.binary))?;
+    let status = wait_child_with_timeout(&mut child, timeout_secs)
+        .with_context(|| format!("{} timed out", config.binary))?;
     if !status.success() {
         bail!("tailwind standalone compile failed");
     }
@@ -877,7 +1057,18 @@ fn load_build_cache(path: &Path) -> Result<BuildCache> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read build cache {}", path.display()))?;
     match serde_json::from_str(&raw) {
-        Ok(cache) => Ok(cache),
+        Ok(cache) => {
+            let cache: BuildCache = cache;
+            if cache.schema_version != BUILD_CACHE_SCHEMA_VERSION {
+                eprintln!(
+                    "warning: cache schema mismatch {} != {}, resetting cache",
+                    cache.schema_version, BUILD_CACHE_SCHEMA_VERSION
+                );
+                Ok(BuildCache::default())
+            } else {
+                Ok(cache)
+            }
+        }
         Err(err) => {
             eprintln!(
                 "warning: invalid build cache {}, resetting cache: {}",
@@ -902,19 +1093,20 @@ fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
 fn compute_template_dependency_hash(db: &QueryDb, template_dir: Option<&Path>) -> Result<String> {
     let mut hashes = Vec::new();
     if let Some(templates) = template_dir {
-        for entry in WalkDir::new(templates).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let raw = read_file_for_query(entry.path());
-            let source = SourceFile::new(db, entry.path().to_path_buf(), raw);
-            let fingerprint = combine_fingerprints(
-                db,
-                entry.path().display().to_string(),
-                content_hash(db, source),
-            );
-            hashes.push(fingerprint);
-        }
+        let files: Vec<PathBuf> = WalkDir::new(templates)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        hashes = files
+            .par_iter()
+            .map(|path| {
+                let raw = read_file_for_query(path);
+                let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
+                format!("{}:{}", path.display(), digest)
+            })
+            .collect();
     }
 
     hashes.sort_unstable();
@@ -1034,29 +1226,28 @@ fn read_file_for_query(path: &Path) -> String {
 }
 
 fn build_semantic_index(content_dir: &Path, output_dir: &Path) -> Result<usize> {
-    let mut docs = Vec::new();
-    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.path().extension().and_then(OsStr::to_str) != Some("md") {
-            continue;
-        }
-        let raw = fs::read_to_string(entry.path())
-            .with_context(|| format!("failed to read markdown for semantic index {}", entry.path().display()))?;
-        let (frontmatter, body) = parse_frontmatter(&raw)
-            .with_context(|| format!("failed to parse markdown for semantic index {}", entry.path().display()))?;
-        let title = frontmatter
-            .title
-            .or_else(|| entry.path().file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
-            .unwrap_or_else(|| "Untitled".to_string());
-        let embedding = embed_text_lightweight(body, 32);
-        docs.push(SemanticIndexDoc {
-            path: entry.path().display().to_string(),
-            title,
-            embedding,
-        });
-    }
+    let files: Vec<PathBuf> = WalkDir::new(content_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.path().extension().and_then(OsStr::to_str) == Some("md"))
+        .map(|entry| entry.path().to_path_buf())
+        .collect();
+    let docs: Vec<SemanticIndexDoc> = files
+        .par_iter()
+        .filter_map(|path| {
+            let raw = fs::read_to_string(path).ok()?;
+            let (frontmatter, body) = parse_frontmatter(&raw).ok()?;
+            let title = frontmatter
+                .title
+                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+                .unwrap_or_else(|| "Untitled".to_string());
+            Some(SemanticIndexDoc {
+                path: path.display().to_string(),
+                title,
+                embedding: embed_text_lightweight(body, 32),
+            })
+        })
+        .collect();
 
     let semantic_path = output_dir.join("search").join("semantic-index.json");
     if let Some(parent) = semantic_path.parent() {
@@ -1099,6 +1290,276 @@ fn request_status(client: &Client, method: Method, url: &str) -> Option<u16> {
         .map(|response| response.status().as_u16())
 }
 
+fn load_data_context(content_dir: &Path) -> Result<serde_json::Value> {
+    let data_dir = content_dir.join("data");
+    if !data_dir.exists() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let mut root = serde_json::Map::new();
+    for entry in WalkDir::new(&data_dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(&data_dir)
+            .with_context(|| format!("failed to relativize data file {}", entry.path().display()))?;
+        let key = rel
+            .with_extension("")
+            .to_string_lossy()
+            .replace(['/', '\\'], ".");
+        let raw = fs::read_to_string(entry.path())
+            .with_context(|| format!("failed to read data file {}", entry.path().display()))?;
+        let value = match entry.path().extension().and_then(OsStr::to_str) {
+            Some("json") => serde_json::from_str(&raw)
+                .with_context(|| format!("failed to parse json data {}", entry.path().display()))?,
+            Some("yaml") | Some("yml") => serde_yaml::from_str::<serde_json::Value>(&raw)
+                .with_context(|| format!("failed to parse yaml data {}", entry.path().display()))?,
+            Some("toml") => {
+                let toml_value: toml::Value =
+                    toml::from_str(&raw).with_context(|| format!("failed to parse toml data {}", entry.path().display()))?;
+                serde_json::to_value(toml_value).context("failed to convert toml data to json value")?
+            }
+            _ => continue,
+        };
+        root.insert(key, value);
+    }
+    Ok(serde_json::Value::Object(root))
+}
+
+fn collect_content_entries(content_dir: &Path, output_dir: &Path) -> Result<Vec<ContentEntry>> {
+    let mut entries = Vec::new();
+    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() || entry.path().extension().and_then(OsStr::to_str) != Some("md") {
+            continue;
+        }
+        let raw = fs::read_to_string(entry.path())
+            .with_context(|| format!("failed to read content entry {}", entry.path().display()))?;
+        let (fm, _) = parse_frontmatter(&raw)
+            .with_context(|| format!("failed to parse content entry {}", entry.path().display()))?;
+        let output = output_path_for(
+            entry.path(),
+            content_dir,
+            output_dir,
+            fm.slug.as_deref(),
+            fm.lang.as_deref(),
+        )?;
+        let rel = output
+            .strip_prefix(output_dir)
+            .unwrap_or(output.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let url = format!("/{}", rel.trim_end_matches("index.html")).replace("//", "/");
+        entries.push(ContentEntry {
+            title: fm
+                .title
+                .or_else(|| entry.path().file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+                .unwrap_or_else(|| "Untitled".to_string()),
+            url,
+            date: fm.date,
+            tags: fm.tags.unwrap_or_default(),
+            categories: fm.categories.unwrap_or_default(),
+        });
+    }
+    entries.sort_by(|a, b| b.date.cmp(&a.date));
+    Ok(entries)
+}
+
+fn generate_content_organization_outputs(entries: &[ContentEntry], output_dir: &Path) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let posts_dir = output_dir.join("posts");
+    fs::create_dir_all(&posts_dir).with_context(|| format!("failed to create {}", posts_dir.display()))?;
+    let per_page = 10usize;
+    for (idx, chunk) in entries.chunks(per_page).enumerate() {
+        let page_num = idx + 1;
+        let page_dir = if page_num == 1 {
+            posts_dir.clone()
+        } else {
+            posts_dir.join("page").join(page_num.to_string())
+        };
+        fs::create_dir_all(&page_dir).with_context(|| format!("failed to create {}", page_dir.display()))?;
+        let mut html = String::from("<!doctype html><html><body><h1>Posts</h1><ul>");
+        for item in chunk {
+            html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
+        }
+        html.push_str("</ul></body></html>");
+        fs::write(page_dir.join("index.html"), html).with_context(|| "failed to write posts page".to_string())?;
+    }
+
+    let mut tags: BTreeMap<String, Vec<&ContentEntry>> = BTreeMap::new();
+    let mut categories: BTreeMap<String, Vec<&ContentEntry>> = BTreeMap::new();
+    for item in entries {
+        for tag in &item.tags {
+            tags.entry(tag.clone()).or_default().push(item);
+        }
+        for category in &item.categories {
+            categories.entry(category.clone()).or_default().push(item);
+        }
+    }
+    write_taxonomy_pages(output_dir.join("tags"), "Tags", &tags)?;
+    write_taxonomy_pages(output_dir.join("categories"), "Categories", &categories)?;
+    Ok(())
+}
+
+fn write_taxonomy_pages(
+    root: PathBuf,
+    heading: &str,
+    groups: &BTreeMap<String, Vec<&ContentEntry>>,
+) -> Result<()> {
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    for (name, entries) in groups {
+        let key = slugify(name);
+        let dir = root.join(&key);
+        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        let mut html = format!("<!doctype html><html><body><h1>{}: {}</h1><ul>", heading, name);
+        for item in entries {
+            html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
+        }
+        html.push_str("</ul></body></html>");
+        fs::write(dir.join("index.html"), html)
+            .with_context(|| format!("failed to write taxonomy page {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut sitemap =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">");
+    for item in entries {
+        sitemap.push_str(&format!("<url><loc>{}</loc></url>", item.url));
+    }
+    sitemap.push_str("</urlset>");
+    fs::write(output_dir.join("sitemap.xml"), sitemap).context("failed to write sitemap.xml")?;
+
+    let mut rss = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>Nanoss Feed</title>",
+    );
+    for item in entries.iter().take(20) {
+        rss.push_str(&format!(
+            "<item><title>{}</title><link>{}</link>{}</item>",
+            item.title,
+            item.url,
+            item.date
+                .as_ref()
+                .map(|date| format!("<pubDate>{}</pubDate>", date))
+                .unwrap_or_default()
+        ));
+    }
+    rss.push_str("</channel></rss>");
+    fs::write(output_dir.join("rss.xml"), rss).context("failed to write rss.xml")?;
+    Ok(())
+}
+
+fn validate_build_config(config: &BuildConfig) -> Result<()> {
+    if config.max_frontmatter_bytes == 0 {
+        bail!("max_frontmatter_bytes must be greater than zero");
+    }
+    if config.max_file_bytes == 0 {
+        bail!("max_file_bytes must be greater than zero");
+    }
+    if config.max_total_files == 0 {
+        bail!("max_total_files must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_frontmatter_size(raw: &str, limit: usize) -> Result<()> {
+    if !raw.starts_with("---\n") {
+        return Ok(());
+    }
+    let remainder = &raw[4..];
+    if let Some(end) = remainder.find("\n---\n") {
+        if end > limit {
+            bail!("frontmatter size {} exceeds limit {}", end, limit);
+        }
+    }
+    Ok(())
+}
+
+fn hashed_file_content(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => blake3::hash(&bytes).to_hex().to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+fn asset_output_path(source: &Path, content_root: &Path, output_root: &Path, force_ext: Option<&str>) -> Result<PathBuf> {
+    let rel = source
+        .strip_prefix(content_root)
+        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let mut target = output_root.join(rel);
+    if let Some(ext) = force_ext {
+        target.set_extension(ext);
+    }
+    ensure_inside_output(output_root, &target)?;
+    Ok(target)
+}
+
+fn validate_route_segment(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{field} cannot be empty");
+    }
+    if value.contains("..") || value.contains('/') || value.contains('\\') {
+        bail!("{field} contains invalid path traversal characters");
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("{field} may only contain [a-zA-Z0-9_-]");
+    }
+    Ok(())
+}
+
+fn ensure_inside_output(output_root: &Path, candidate: &Path) -> Result<()> {
+    let normalized_root = output_root
+        .canonicalize()
+        .unwrap_or_else(|_| output_root.to_path_buf());
+    let normalized_candidate_parent = candidate
+        .parent()
+        .unwrap_or(candidate)
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.parent().unwrap_or(candidate).to_path_buf());
+    if !normalized_candidate_parent.starts_with(&normalized_root) {
+        bail!(
+            "target path escapes output directory: {}",
+            candidate.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_binary_name_safe(binary: &str) -> Result<()> {
+    if binary.trim().is_empty() {
+        bail!("binary name cannot be empty");
+    }
+    if binary.contains('\n') || binary.contains('\r') {
+        bail!("binary name contains invalid control characters");
+    }
+    Ok(())
+}
+
+fn wait_child_with_timeout(child: &mut Child, timeout_secs: u64) -> Result<ExitStatus> {
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().context("failed to poll child process")? {
+            return Ok(status);
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            bail!("child process timed out after {}s", timeout_secs.max(1));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,6 +1592,42 @@ mod tests {
         let final_asset = fs::read_to_string(out.path().join("assets/logo.txt"))
             .context("failed to read merged asset")?;
         assert_eq!(final_asset, "site");
+        Ok(())
+    }
+
+    #[test]
+    fn route_segment_rejects_traversal() {
+        assert!(validate_route_segment("../etc", "slug").is_err());
+        assert!(validate_route_segment("ok-slug_1", "slug").is_ok());
+    }
+
+    #[test]
+    fn build_cache_schema_mismatch_resets() -> Result<()> {
+        let dir = tempdir().context("failed to create tempdir")?;
+        let cache_file = dir.path().join(BUILD_CACHE_FILE);
+        fs::write(
+            &cache_file,
+            r#"{"schema_version":1,"pages":{"k":{"hash":"h","output":"o"}}}"#,
+        )
+        .context("failed to write cache fixture")?;
+        let cache = load_build_cache(&cache_file)?;
+        assert_eq!(cache.schema_version, BUILD_CACHE_SCHEMA_VERSION);
+        assert!(cache.pages.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn data_context_supports_json_yaml_toml() -> Result<()> {
+        let dir = tempdir().context("failed to create tempdir")?;
+        fs::create_dir_all(dir.path().join("data")).context("failed to create data dir")?;
+        fs::write(dir.path().join("data/site.json"), r#"{"name":"nanoss"}"#).context("write json")?;
+        fs::write(dir.path().join("data/theme.yaml"), "kind: blog").context("write yaml")?;
+        fs::write(dir.path().join("data/build.toml"), "mode = 'fast'").context("write toml")?;
+        let data = load_data_context(dir.path())?;
+        let obj = data.as_object().context("expected object data")?;
+        assert!(obj.contains_key("site"));
+        assert!(obj.contains_key("theme"));
+        assert!(obj.contains_key("build"));
         Ok(())
     }
 }
