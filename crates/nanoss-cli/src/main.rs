@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use nanoss_core::{build_site, BuildConfig};
+use nanoss_plugin_host::{PluginHost, PluginHostConfig};
 
 #[derive(Parser)]
 #[command(name = "nanoss", version, about = "A modern Rust static site generator")]
@@ -24,6 +25,8 @@ enum Command {
         check_external_links: bool,
         #[arg(long, default_value_t = false)]
         fail_on_broken_links: bool,
+        #[arg(long = "plugin")]
+        plugin_paths: Vec<PathBuf>,
     },
 }
 
@@ -37,7 +40,15 @@ fn main() -> Result<()> {
             template_dir,
             check_external_links,
             fail_on_broken_links,
+            plugin_paths,
         } => {
+            let plugin_host = PluginHost::new(PluginHostConfig {
+                plugin_paths,
+                timeout_ms: 2_000,
+                memory_limit_mb: 128,
+            })?;
+            plugin_host.init("{}")?;
+
             let report = build_site(&BuildConfig {
                 content_dir,
                 output_dir,
@@ -45,6 +56,7 @@ fn main() -> Result<()> {
                 check_external_links,
                 fail_on_broken_links,
             })?;
+            plugin_host.shutdown()?;
             println!(
                 "Built {} pages, compiled {} Sass files, copied {} assets, checked {} external links ({} broken).",
                 report.rendered_pages,
