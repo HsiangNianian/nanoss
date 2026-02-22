@@ -1741,10 +1741,12 @@ name = "nanoss-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "grass",
  "lightningcss",
  "minijinja",
  "nanoss-plugin-host",
+ "nanoss-query",
  "once_cell",
  "pulldown-cmark",
  "regex",

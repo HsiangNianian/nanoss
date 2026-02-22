@@ -15,6 +15,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 grass = "0.13"
 minijinja = "2"
