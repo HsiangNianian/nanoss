@@ -637,7 +637,11 @@ fn output_path_for(
             validate_route_segment(lang, "lang")?;
             base = base.join(lang);
         }
-        let candidate = base.join(slug).join("index.html");
+        let candidate = if slug == "index" {
+            base.join("index.html")
+        } else {
+            base.join(slug).join("index.html")
+        };
         ensure_inside_output(output_root, &candidate)?;
         return Ok(candidate);
     }
@@ -1517,15 +1521,7 @@ fn validate_route_segment(value: &str, field: &str) -> Result<()> {
 }
 
 fn ensure_inside_output(output_root: &Path, candidate: &Path) -> Result<()> {
-    let normalized_root = output_root
-        .canonicalize()
-        .unwrap_or_else(|_| output_root.to_path_buf());
-    let normalized_candidate_parent = candidate
-        .parent()
-        .unwrap_or(candidate)
-        .canonicalize()
-        .unwrap_or_else(|_| candidate.parent().unwrap_or(candidate).to_path_buf());
-    if !normalized_candidate_parent.starts_with(&normalized_root) {
+    if !candidate.starts_with(output_root) {
         bail!(
             "target path escapes output directory: {}",
             candidate.display()
