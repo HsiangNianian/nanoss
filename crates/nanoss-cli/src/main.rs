@@ -30,6 +30,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Build(BuildArgs),
+    Dev(ServerArgs),
     Server(ServerArgs),
     Deploy(DeployArgs),
     GenerateCi(GenerateCiArgs),
@@ -196,6 +197,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Build(args) => run_build(&args),
+        Command::Dev(mut args) => {
+            args.watch = true;
+            run_server(args)
+        }
         Command::Server(args) => run_server(args),
         Command::Deploy(args) => run_deploy(args),
         Command::GenerateCi(args) => run_generate_ci(args),
@@ -258,6 +263,10 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         },
         tailwind,
         enable_ai_index: args.enable_ai_index,
+        max_frontmatter_bytes: 64 * 1024,
+        max_file_bytes: 10 * 1024 * 1024,
+        max_total_files: 100_000,
+        command_timeout_secs: 120,
     })?;
     println!(
         "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
@@ -340,7 +349,7 @@ fn run_generate_ci(args: GenerateCiArgs) -> Result<()> {
                 fs::create_dir_all(parent).context("failed to create github workflow directory")?;
             }
             let yaml = format!(
-                "name: nanoss\non: [push, pull_request]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n      - run: cargo run -p nanoss-cli -- build --output-dir {}\n      - uses: actions/upload-artifact@v4\n        with:\n          name: site\n          path: {}\n",
+                "name: nanoss\non: [push, pull_request]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: dtolnay/rust-toolchain@stable\n      - run: cargo run -p nanoss-cli -- build --output-dir {}\n      - run: bash scripts/bench_gate.sh bench/thresholds.toml\n      - uses: actions/upload-artifact@v4\n        with:\n          name: site\n          path: {}\n",
                 args.output_dir.display(),
                 args.output_dir.display()
             );
@@ -349,7 +358,7 @@ fn run_generate_ci(args: GenerateCiArgs) -> Result<()> {
         }
         CiProviderArg::Gitlab => {
             let yaml = format!(
-                "stages:\n  - build\nbuild:\n  stage: build\n  image: rust:latest\n  script:\n    - cargo run -p nanoss-cli -- build --output-dir {}\n  artifacts:\n    paths:\n      - {}\n",
+                "stages:\n  - build\nbuild:\n  stage: build\n  image: rust:latest\n  script:\n    - cargo run -p nanoss-cli -- build --output-dir {}\n    - bash scripts/bench_gate.sh bench/thresholds.toml\n  artifacts:\n    paths:\n      - {}\n",
                 args.output_dir.display(),
                 args.output_dir.display()
             );
