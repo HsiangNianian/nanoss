@@ -7,7 +7,10 @@ Initialize a full starter project in the current directory (or custom dir).
 ```bash
 nanoss init
 nanoss init --dir my-site
+nanoss init --dir my-site -f
 ```
+
+`-f/--force` overwrites scaffold files if they already exist.
 
 ## `nanoss new`
 
@@ -18,9 +21,11 @@ nanoss new site my-site
 nanoss new theme my-theme
 nanoss new page docs/getting-started
 nanoss new plugin my-plugin
+nanoss new site my-site -f
 ```
 
 If you run `nanoss new <name>`, Nanoss enters interactive mode and lets you choose `site/theme/page/plugin`.
+If target already exists, use `-f/--force` to continue.
 
 ## `nanoss server`
 
@@ -28,11 +33,12 @@ Serve the generated site locally and optionally watch for source changes.
 
 ```bash
 nanoss server --content-dir content --template-dir templates --output-dir public --host 127.0.0.1 --port 1111
+nanoss server --mount-path /nanoss
 ```
 
 ## `nanoss dev`
 
-`dev` is an alias of `server` with watch enabled by default.
+`dev` is an alias of `server` with watch enabled by default. It also supports `--mount-path`.
 
 ## `nanoss deploy`
 

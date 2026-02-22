@@ -1201,9 +1201,11 @@ mod tests {
         with_temp_cwd(|| {
             run_init(InitArgs {
                 dir: PathBuf::from("."),
+                force: false,
             })?;
             run_init(InitArgs {
                 dir: PathBuf::from("."),
+                force: false,
             })?;
             assert!(PathBuf::from("nanoss.toml").exists());
             assert!(PathBuf::from("content/index.md").exists());
@@ -1220,6 +1222,7 @@ mod tests {
                     name: "demo-site".to_string(),
                 }),
                 name: None,
+                force: false,
             })?;
             assert!(PathBuf::from("demo-site/nanoss.toml").exists());
 
@@ -1228,6 +1231,7 @@ mod tests {
                     name: "demo-theme".to_string(),
                 }),
                 name: None,
+                force: false,
             })?;
             assert!(PathBuf::from(".nanoss/themes/demo-theme/theme.toml").exists());
 
@@ -1236,6 +1240,7 @@ mod tests {
                     path: "guide/getting-started".to_string(),
                 }),
                 name: None,
+                force: false,
             })?;
             assert!(PathBuf::from("content/guide/getting-started.md").exists());
 
@@ -1244,6 +1249,7 @@ mod tests {
                     name: "demo-plugin".to_string(),
                 }),
                 name: None,
+                force: false,
             })?;
             assert!(PathBuf::from("plugins/demo-plugin/Cargo.toml").exists());
             Ok(())
@@ -1267,10 +1273,52 @@ mod tests {
         with_temp_cwd(|| {
             run_init(InitArgs {
                 dir: PathBuf::from("."),
+                force: false,
             })?;
             run_build(&default_build_args())?;
             assert!(PathBuf::from("public/index.html").exists());
             Ok(())
         })
+    }
+
+    #[test]
+    fn new_site_requires_force_when_dir_exists() -> Result<()> {
+        with_temp_cwd(|| {
+            fs::create_dir_all("demo").context("failed to create existing dir")?;
+            let err = run_new(NewArgs {
+                kind: Some(NewCommand::Site {
+                    name: "demo".to_string(),
+                }),
+                name: None,
+                force: false,
+            })
+            .expect_err("expected exists error");
+            assert!(err.to_string().contains("already exists"));
+
+            run_new(NewArgs {
+                kind: Some(NewCommand::Site {
+                    name: "demo".to_string(),
+                }),
+                name: None,
+                force: true,
+            })?;
+            assert!(PathBuf::from("demo/nanoss.toml").exists());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn mount_path_routing_and_normalization_work() -> Result<()> {
+        assert_eq!(normalize_mount_path("/")?, "/");
+        assert_eq!(normalize_mount_path("/nanoss/")?, "/nanoss");
+        assert!(normalize_mount_path("nanoss").is_err());
+
+        assert_eq!(route_for_mount("/nanoss", "/nanoss"), Some("/".to_string()));
+        assert_eq!(
+            route_for_mount("/nanoss/cli.html", "/nanoss"),
+            Some("/cli.html".to_string())
+        );
+        assert_eq!(route_for_mount("/cli.html", "/nanoss"), None);
+        Ok(())
     }
 }

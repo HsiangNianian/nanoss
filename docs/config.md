@@ -9,6 +9,9 @@ Nanoss supports a project-level config file at repository root: `nanoss.toml`.
 base_path = "/nanoss"
 site_domain = "https://hsiangnianian.github.io"
 
+[server]
+mount_path = "/nanoss"
+
 [theme]
 name = "my-theme"
 
@@ -21,6 +24,7 @@ enabled = ["demo-plugin"]
 - `nanoss init` / `nanoss new site <name>` generate a starter `nanoss.toml` by default.
 - `build.base_path` is used to rewrite absolute site links (`/foo`) for subpath deploys.
 - `build.site_domain` is optional. When set, sitemap/RSS links become absolute URLs.
+- `server.mount_path` is optional. Use it in local `dev/server` to simulate subpath hosting.
 - Priority is: CLI flag > `nanoss.toml` > default.
   - Example: `nanoss build --base-path /docs-preview`
 - CLI override for domain: `nanoss build --site-domain https://example.com`
