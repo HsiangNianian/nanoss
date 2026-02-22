@@ -1,0 +1,7 @@
+[nanoss]
+cold_build_ms_p95 = 5000
+incremental_build_ms_p95 = 1200
+unrelated_asset_rebuild_ms_p95 = 1200
+
+[gate]
+allow_regression_ratio = 0.15

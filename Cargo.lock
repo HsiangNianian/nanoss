@@ -1855,6 +1855,7 @@ dependencies = [
  "nanoss-query",
  "once_cell",
  "pulldown-cmark",
+ "rayon",
  "regex",
  "reqwest",
  "rswind",
@@ -1863,6 +1864,7 @@ dependencies = [
  "serde_yaml",
  "syntect",
  "tempfile",
+ "toml 0.8.23",
  "walkdir",
 ]
 
