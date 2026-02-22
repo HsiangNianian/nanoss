@@ -7,12 +7,16 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 grass.workspace = true
+lightningcss = { version = "1.0.0-alpha.70", default-features = false }
 minijinja.workspace = true
+nanoss-plugin-host = { path = "../nanoss-plugin-host" }
 once_cell.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+rswind = "0.0.1-alpha.1"
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
 syntect.workspace = true
 walkdir.workspace = true
