@@ -1,0 +1,10 @@
+[package]
+name = "nanoss-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+nanoss-core = { path = "../nanoss-core" }
