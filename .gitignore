@@ -1,2 +1,17 @@
 /target
 /public
+*-public/
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+dist/
+build/
+coverage/
+.env
+*.env
+*.env.*
