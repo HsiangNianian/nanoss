@@ -41,3 +41,23 @@ cargo run -p nanoss-cli -- build \
 - `docs/plugins.md`
 - `docs/themes.md`
 - `docs/cli.md`
+- `docs/config.md`
+
+### Docs local dev
+
+```bash
+cargo run -p nanoss-cli -- dev \
+  --content-dir docs \
+  --template-dir docs-site/templates \
+  --output-dir docs-public
+```
+
+If your docs use subpath deployment (for example GitHub Pages `/nanoss`), use:
+
+```bash
+cargo run -p nanoss-cli -- dev \
+  --content-dir docs \
+  --template-dir docs-site/templates \
+  --output-dir docs-public \
+  --mount-path /nanoss
+```

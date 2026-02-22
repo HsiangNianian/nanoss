@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }} | Nanoss Docs</title>
+    <style>
+      :root {
+        color-scheme: dark light;
+        --bg: #0b1020;
+        --panel: #111936;
+        --panel-2: #162345;
+        --text: #e8ecf8;
+        --muted: #98a2b3;
+        --accent: #7dd3fc;
+        --line: #26314f;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        background: radial-gradient(circle at 20% 0%, #101a38 0%, var(--bg) 45%);
+        color: var(--text);
+      }
+      .container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+      .topbar {
+        border-bottom: 1px solid var(--line);
+        background: rgba(11, 16, 32, 0.7);
+        backdrop-filter: blur(6px);
+      }
+      .brand { font-weight: 700; padding: 16px 20px; letter-spacing: 0.2px; }
+      .layout {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: minmax(220px, 280px) 1fr;
+        padding-top: 22px;
+        padding-bottom: 36px;
+      }
+      .toc-card, .content-card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: linear-gradient(180deg, var(--panel-2), var(--panel));
+      }
+      .toc-card { padding: 14px 16px; position: sticky; top: 16px; height: fit-content; }
+      .toc-card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+      .content-card { padding: 20px 24px; min-height: 70vh; }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      pre { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #0b1329; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      @media (max-width: 900px) {
+        .layout { grid-template-columns: 1fr; }
+        .toc-card { position: static; }
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f4f7fb;
+          --panel: #ffffff;
+          --panel-2: #ffffff;
+          --text: #0f172a;
+          --muted: #475569;
+          --accent: #0369a1;
+          --line: #dbe4f0;
+        }
+        body { background: linear-gradient(180deg, #f7fbff 0%, var(--bg) 38%); }
+        .topbar { background: rgba(255, 255, 255, 0.75); }
+        pre { background: #f8fafc; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container brand">Nanoss Docs</div>
+    </header>
+    <main class="container layout">
+      {% if toc %}
+      <aside class="toc-card" aria-label="Table of contents">
+        <h2>On this page</h2>
+        {{ toc | safe }}
+      </aside>
+      {% endif %}
+      <article class="content-card">
+        {{ content | safe }}
+      </article>
+    </main>
+  </body>
+</html>
