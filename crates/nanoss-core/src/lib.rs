@@ -1504,6 +1504,20 @@ fn normalize_base_path(input: &str) -> String {
     normalized
 }
 
+fn normalize_site_domain(input: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = input else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        bail!("site_domain must start with http:// or https://");
+    }
+    Ok(Some(trimmed.trim_end_matches('/').to_string()))
+}
+
 fn base_href_prefix(base_path: &str) -> &str {
     if base_path == "/" {
         ""
@@ -1528,6 +1542,16 @@ fn with_base_path(url: &str, base_path: &str) -> String {
 fn to_site_url(path_without_root: &str, base_path: &str) -> String {
     let raw = format!("/{}", path_without_root).replace("//", "/");
     with_base_path(&raw, base_path)
+}
+
+fn canonicalize_site_url(path: &str, site_domain: Option<&str>) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return path.to_string();
+    }
+    if let Some(domain) = site_domain {
+        return format!("{domain}{path}");
+    }
+    path.to_string()
 }
 
 fn rewrite_html_absolute_links_with_base_path(html: &str, base_path: &str) -> String {

@@ -38,3 +38,4 @@ Generated templates include benchmark regression gate script execution (`scripts
 - Plugins can be enabled through `nanoss.toml` and plugin registry.
 - Theme can be selected with `--theme <name>` or `nanoss.toml`.
 - Base path can be set with `--base-path /subpath` or `nanoss.toml` (`[build].base_path`).
+- Site domain can be set with `--site-domain https://example.com` or `nanoss.toml` (`[build].site_domain`).

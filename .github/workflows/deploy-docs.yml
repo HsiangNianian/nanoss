@@ -35,7 +35,6 @@ jobs:
             --content-dir docs \
             --template-dir docs-site/templates \
             --output-dir docs-public
-            # --base-path /nanoss
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

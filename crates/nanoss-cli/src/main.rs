@@ -169,8 +169,11 @@ enum CiProviderArg {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProjectConfig {
+    #[serde(default)]
     plugins: ProjectPluginsConfig,
+    #[serde(default)]
     theme: ProjectThemeConfig,
+    #[serde(default)]
     build: ProjectBuildConfig,
 }
 

@@ -1,2 +1,4 @@
 [build]
 base_path = "/nanoss"
+# Optional: used for absolute sitemap/feed links.
+site_domain = "https://hsiangnianian.github.io"
