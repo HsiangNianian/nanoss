@@ -65,6 +65,7 @@ pub struct BuildConfig {
     pub content_dir: PathBuf,
     pub output_dir: PathBuf,
     pub template_dir: Option<PathBuf>,
+    pub theme_dir: Option<PathBuf>,
     pub plugin_paths: Vec<PathBuf>,
     pub plugin_timeout_ms: u64,
     pub plugin_memory_limit_mb: u64,
@@ -147,7 +148,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
 
     let mut env = Environment::new();
-    let page_template = load_page_template(config.template_dir.as_deref())?;
+    let page_template = load_page_template(config.template_dir.as_deref(), config.theme_dir.as_deref())?;
     env.add_template("page.html", &page_template)
         .context("failed to register template")?;
 
@@ -167,6 +168,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         run_tailwind(tailwind, &config.content_dir)?;
         report.compiled_tailwind = true;
     }
+    copy_theme_static_assets(config.theme_dir.as_deref(), &config.output_dir)?;
 
     let mut islands_runtime_written = false;
     for entry in WalkDir::new(&config.content_dir).into_iter().filter_map(Result::ok) {
@@ -322,7 +324,7 @@ fn render_markdown_file(path: &Path, env: &Environment<'_>, plugin_host: &Plugin
     })
 }
 
-fn load_page_template(template_dir: Option<&Path>) -> Result<String> {
+fn load_page_template(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<String> {
     if let Some(dir) = template_dir {
         let candidate = dir.join("page.html");
         if candidate.exists() {
@@ -330,7 +332,46 @@ fn load_page_template(template_dir: Option<&Path>) -> Result<String> {
                 .with_context(|| format!("failed to read template {}", candidate.display()));
         }
     }
+    if let Some(theme) = theme_dir {
+        let candidate = theme.join("templates").join("page.html");
+        if candidate.exists() {
+            return fs::read_to_string(&candidate)
+                .with_context(|| format!("failed to read theme template {}", candidate.display()));
+        }
+    }
     Ok(DEFAULT_PAGE_TEMPLATE.to_string())
+}
+
+fn copy_theme_static_assets(theme_dir: Option<&Path>, output_dir: &Path) -> Result<()> {
+    let Some(theme) = theme_dir else {
+        return Ok(());
+    };
+    let static_root = theme.join("static");
+    if !static_root.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(&static_root).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(&static_root)
+            .with_context(|| format!("failed to relativize theme static {}", entry.path().display()))?;
+        let target = output_dir.join(rel);
+        if target.exists() {
+            // Site output takes precedence over theme static assets.
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create theme static parent {}", parent.display()))?;
+        }
+        fs::copy(entry.path(), &target)
+            .with_context(|| format!("failed to copy theme static {} -> {}", entry.path().display(), target.display()))?;
+    }
+    Ok(())
 }
 
 fn parse_frontmatter(input: &str) -> Result<(FrontMatter, &str)> {
@@ -1056,4 +1097,40 @@ fn request_status(client: &Client, method: Method, url: &str) -> Option<u16> {
         .send()
         .ok()
         .map(|response| response.status().as_u16())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn page_template_prefers_site_over_theme() -> Result<()> {
+        let site = tempdir().context("failed to create site dir")?;
+        let theme = tempdir().context("failed to create theme dir")?;
+        fs::write(site.path().join("page.html"), "site").context("failed to write site template")?;
+        fs::create_dir_all(theme.path().join("templates")).context("failed to make theme templates")?;
+        fs::write(theme.path().join("templates/page.html"), "theme")
+            .context("failed to write theme template")?;
+        let chosen = load_page_template(Some(site.path()), Some(theme.path()))?;
+        assert_eq!(chosen, "site");
+        Ok(())
+    }
+
+    #[test]
+    fn copy_theme_static_skips_existing_output() -> Result<()> {
+        let theme = tempdir().context("failed to create theme dir")?;
+        let out = tempdir().context("failed to create output dir")?;
+        fs::create_dir_all(theme.path().join("static/assets")).context("failed to make static dir")?;
+        fs::write(theme.path().join("static/assets/logo.txt"), "theme")
+            .context("failed to write theme asset")?;
+        fs::create_dir_all(out.path().join("assets")).context("failed to make out asset dir")?;
+        fs::write(out.path().join("assets/logo.txt"), "site").context("failed to write site asset")?;
+
+        copy_theme_static_assets(Some(theme.path()), out.path())?;
+        let final_asset = fs::read_to_string(out.path().join("assets/logo.txt"))
+            .context("failed to read merged asset")?;
+        assert_eq!(final_asset, "site");
+        Ok(())
+    }
 }
