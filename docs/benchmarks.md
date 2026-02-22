@@ -1,0 +1,47 @@
+# Benchmark Guide (Nanoss vs Zola)
+
+This document defines a reproducible benchmark workflow.
+
+## Dataset
+
+- Use one medium site profile (~1k markdown files).
+- Use one large site profile (~10k markdown files).
+- Keep identical content and templates between tools.
+
+## Commands
+
+Nanoss cold build:
+
+```bash
+hyperfine --warmup 2 \
+  'cargo run -p nanoss-cli -- build --content-dir <content> --template-dir <templates> --output-dir public'
+```
+
+Nanoss incremental build (touch one page then rebuild):
+
+```bash
+touch <content>/post-0001.md
+hyperfine --warmup 2 \
+  'cargo run -p nanoss-cli -- build --content-dir <content> --template-dir <templates> --output-dir public'
+```
+
+Zola baseline (same dataset):
+
+```bash
+hyperfine --warmup 2 \
+  'zola build -o public-zola'
+```
+
+## Metrics
+
+- Cold build wall time (median, p95).
+- Incremental rebuild wall time (single file change).
+- Output size (total bytes under output directory).
+- Peak memory (optional with `/usr/bin/time -v`).
+
+## Reporting template
+
+- Environment: CPU, RAM, OS, Rust/Zola versions.
+- Dataset size: page count, asset count.
+- Results table: Nanoss vs Zola for each metric.
+- Notes: plugin enabled/disabled, tailwind backend used, AI index enabled/disabled.
