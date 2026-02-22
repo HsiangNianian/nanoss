@@ -50,6 +50,8 @@ enum Command {
 struct BuildArgs {
     #[arg(long, default_value = "content")]
     content_dir: PathBuf,
+    #[arg(long, default_value = "static")]
+    static_dir: PathBuf,
     #[arg(long, default_value = "public")]
     output_dir: PathBuf,
     #[arg(long)]
@@ -377,6 +379,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
 
     let report = build_site(&BuildConfig {
         content_dir: args.content_dir.clone(),
+        static_dir: args.static_dir.clone(),
         output_dir: args.output_dir.clone(),
         template_dir: args.template_dir.clone(),
         theme_dir: selected_theme,
@@ -1134,6 +1137,7 @@ mod tests {
     fn default_build_args() -> BuildArgs {
         BuildArgs {
             content_dir: PathBuf::from("content"),
+            static_dir: PathBuf::from("static"),
             output_dir: PathBuf::from("public"),
             template_dir: Some(PathBuf::from("templates")),
             theme: None,

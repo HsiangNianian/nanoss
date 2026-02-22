@@ -6,8 +6,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
+use anyhow::{anyhow, bail, Context, Result};
+use lightningcss::stylesheet::{ParserFlags, ParserOptions, PrinterOptions, StyleSheet};
 use minijinja::{context, Environment};
 use nanoss_plugin_host::{PluginHost, PluginHostConfig};
 use nanoss_query::{combine_fingerprints, content_hash, QueryDb, SourceFile};
@@ -66,6 +66,7 @@ const BUILD_CACHE_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
     pub content_dir: PathBuf,
+    pub static_dir: PathBuf,
     pub output_dir: PathBuf,
     pub template_dir: Option<PathBuf>,
     pub theme_dir: Option<PathBuf>,
@@ -213,11 +214,16 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     let data_context = load_data_context(&config.content_dir)?;
     let cache_path = config.output_dir.join(BUILD_CACHE_FILE);
     let mut build_cache = load_build_cache(&cache_path)?;
-    let template_hash = compute_template_dependency_hash(&query_db, config.template_dir.as_deref())?;
+    let template_hash = compute_template_dependency_hash(
+        &query_db,
+        config.template_dir.as_deref(),
+        config.theme_dir.as_deref(),
+    )?;
     if let Some(tailwind) = &config.tailwind {
         run_tailwind(tailwind, &config.content_dir, config.command_timeout_secs)?;
         report.compiled_tailwind = true;
     }
+    copy_site_static_assets(&config.static_dir, &config.output_dir)?;
     copy_theme_static_assets(config.theme_dir.as_deref(), &config.output_dir)?;
 
     let mut islands_runtime_written = false;
@@ -542,6 +548,31 @@ fn copy_theme_static_assets(theme_dir: Option<&Path>, output_dir: &Path) -> Resu
         fs::copy(entry.path(), &target)
             .with_context(|| format!("failed to copy theme static {} -> {}", entry.path().display(), target.display()))?;
     }
+    Ok(())
+}
+
+fn copy_site_static_assets(static_dir: &Path, output_dir: &Path) -> Result<()> {
+    if !static_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in WalkDir::new(static_dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(static_dir)
+            .with_context(|| format!("failed to relativize static asset {}", entry.path().display()))?;
+        let target = output_dir.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create static asset parent {}", parent.display()))?;
+        }
+        fs::copy(entry.path(), &target)
+            .with_context(|| format!("failed to copy static asset {} -> {}", entry.path().display(), target.display()))?;
+    }
+
     Ok(())
 }
 
@@ -993,19 +1024,17 @@ for (const node of islands) {
     Ok(())
 }
 
-fn optimize_css(source: &Path, css: &str) -> Result<String> {
-    let options: ParserOptions<'static, 'static> = ParserOptions {
+fn optimize_css<'a>(source: &Path, css: &'a str) -> Result<String> {
+    let options: ParserOptions<'a, 'a> = ParserOptions {
         filename: source.display().to_string(),
-        ..ParserOptions::default()
+        css_modules: None,
+        source_index: 0,
+        error_recovery: false,
+        warnings: None,
+        flags: ParserFlags::empty(),
     };
-    // LightningCSS parser keeps references tied to input lifetime; for this prototype we
-    // promote the buffer to 'static per build step to keep integration straightforward.
-    let leaked_css: &'static str = Box::leak(css.to_string().into_boxed_str());
-    let output = StyleSheet::parse(
-        leaked_css,
-        options,
-    )
-    .with_context(|| format!("failed to parse CSS {}", source.display()))?
+    let output = StyleSheet::parse(css, options)
+        .map_err(|err| anyhow!("failed to parse CSS {}: {err}", source.display()))?
         .to_css(PrinterOptions {
             minify: true,
             ..PrinterOptions::default()
@@ -1108,8 +1137,13 @@ fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
     Ok(())
 }
 
-fn compute_template_dependency_hash(db: &QueryDb, template_dir: Option<&Path>) -> Result<String> {
+fn compute_template_dependency_hash(
+    db: &QueryDb,
+    template_dir: Option<&Path>,
+    theme_dir: Option<&Path>,
+) -> Result<String> {
     let mut hashes = Vec::new();
+
     if let Some(templates) = template_dir {
         let files: Vec<PathBuf> = WalkDir::new(templates)
             .into_iter()
@@ -1117,14 +1151,34 @@ fn compute_template_dependency_hash(db: &QueryDb, template_dir: Option<&Path>) -
             .filter(|e| e.file_type().is_file())
             .map(|e| e.path().to_path_buf())
             .collect();
-        hashes = files
+        hashes.extend(files
             .par_iter()
             .map(|path| {
                 let raw = read_file_for_query(path);
                 let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
-                format!("{}:{}", path.display(), digest)
+                format!("site:{}:{}", path.display(), digest)
             })
-            .collect();
+            .collect::<Vec<_>>());
+    }
+
+    if let Some(theme) = theme_dir {
+        let theme_templates = theme.join("templates");
+        if theme_templates.exists() {
+            let files: Vec<PathBuf> = WalkDir::new(&theme_templates)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.path().to_path_buf())
+                .collect();
+            hashes.extend(files
+                .par_iter()
+                .map(|path| {
+                    let raw = read_file_for_query(path);
+                    let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
+                    format!("theme:{}:{}", path.display(), digest)
+                })
+                .collect::<Vec<_>>());
+        }
     }
 
     hashes.sort_unstable();
@@ -1698,6 +1752,39 @@ mod tests {
         let final_asset = fs::read_to_string(out.path().join("assets/logo.txt"))
             .context("failed to read merged asset")?;
         assert_eq!(final_asset, "site");
+        Ok(())
+    }
+
+    #[test]
+    fn copy_site_static_assets_overwrites_existing_output() -> Result<()> {
+        let static_dir = tempdir().context("failed to create static dir")?;
+        let out = tempdir().context("failed to create output dir")?;
+        fs::create_dir_all(static_dir.path().join("assets")).context("failed to make static assets dir")?;
+        fs::create_dir_all(out.path().join("assets")).context("failed to make output assets dir")?;
+        fs::write(static_dir.path().join("assets/logo.txt"), "site").context("failed to write static asset")?;
+        fs::write(out.path().join("assets/logo.txt"), "old").context("failed to write existing output asset")?;
+
+        copy_site_static_assets(static_dir.path(), out.path())?;
+        let final_asset = fs::read_to_string(out.path().join("assets/logo.txt"))
+            .context("failed to read merged site static asset")?;
+        assert_eq!(final_asset, "site");
+        Ok(())
+    }
+
+    #[test]
+    fn template_hash_includes_theme_templates() -> Result<()> {
+        let query_db = QueryDb::default();
+        let site_templates = tempdir().context("failed to create site templates dir")?;
+        let theme = tempdir().context("failed to create theme dir")?;
+        fs::create_dir_all(theme.path().join("templates")).context("failed to create theme templates")?;
+        fs::write(site_templates.path().join("page.html"), "site-v1").context("failed to write site template")?;
+        fs::write(theme.path().join("templates/page.html"), "theme-v1").context("failed to write theme template")?;
+
+        let before = compute_template_dependency_hash(&query_db, Some(site_templates.path()), Some(theme.path()))?;
+        fs::write(theme.path().join("templates/page.html"), "theme-v2").context("failed to update theme template")?;
+        let after = compute_template_dependency_hash(&query_db, Some(site_templates.path()), Some(theme.path()))?;
+
+        assert_ne!(before, after);
         Ok(())
     }
 
