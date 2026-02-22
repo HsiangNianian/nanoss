@@ -1829,6 +1829,72 @@ mod tests {
     }
 
     #[test]
+    fn organization_pages_use_theme_template() -> Result<()> {
+        let root = tempdir().context("failed to create project root")?;
+        let content = root.path().join("content");
+        let static_dir = root.path().join("static");
+        let output = root.path().join("public");
+        let theme = root.path().join("theme");
+
+        fs::create_dir_all(&content).context("failed to create content dir")?;
+        fs::create_dir_all(&static_dir).context("failed to create static dir")?;
+        fs::create_dir_all(theme.join("templates")).context("failed to create theme templates dir")?;
+
+        fs::write(
+            content.join("post-a.md"),
+            "---\ntitle: Post A\ntags: [rust]\n---\n\nHello A",
+        )
+        .context("failed to write post-a")?;
+        fs::write(
+            content.join("post-b.md"),
+            "---\ntitle: Post B\ncategories: [notes]\n---\n\nHello B",
+        )
+        .context("failed to write post-b")?;
+        fs::write(
+            theme.join("templates/page.html"),
+            "<!doctype html><html><body><div id=\"theme-marker\">{{ title }}</div>{{ content | safe }}</body></html>",
+        )
+        .context("failed to write theme page template")?;
+
+        let config = BuildConfig {
+            content_dir: content,
+            static_dir,
+            output_dir: output.clone(),
+            template_dir: None,
+            theme_dir: Some(theme),
+            plugin_paths: Vec::new(),
+            plugin_init_config_json: "{}".to_string(),
+            plugin_timeout_ms: 2_000,
+            plugin_memory_limit_mb: 128,
+            check_external_links: false,
+            fail_on_broken_links: false,
+            js_backend: JsBackend::Passthrough,
+            tailwind: None,
+            enable_ai_index: false,
+            max_frontmatter_bytes: 64 * 1024,
+            max_file_bytes: 10 * 1024 * 1024,
+            max_total_files: 100_000,
+            command_timeout_secs: 120,
+            base_path: "/".to_string(),
+            site_domain: None,
+        };
+
+        build_site(&config)?;
+
+        let posts_html = fs::read_to_string(output.join("posts/index.html"))
+            .context("failed to read posts index")?;
+        let tags_html = fs::read_to_string(output.join("tags/rust/index.html"))
+            .context("failed to read tags index")?;
+        let categories_html = fs::read_to_string(output.join("categories/notes/index.html"))
+            .context("failed to read categories index")?;
+
+        assert!(posts_html.contains("theme-marker"));
+        assert!(tags_html.contains("theme-marker"));
+        assert!(categories_html.contains("theme-marker"));
+        Ok(())
+    }
+
+    #[test]
     fn route_segment_rejects_traversal() {
         assert!(validate_route_segment("../etc", "slug").is_err());
         assert!(validate_route_segment("ok-slug_1", "slug").is_ok());
