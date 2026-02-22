@@ -6,17 +6,19 @@
     <title>{{ title }} | Nanoss Docs</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
       :root {
         /* Replicate/Vercel/Modern Tech Aesthetics */
         --c-bg: #FFFFFF;
         --c-text: #000000;
         --c-subtext: #666666;
-        --c-accent: #000000; /* Sturdy black accent in light mode */
+        --c-accent: #000000;
         --c-line: #EAEAEA;
         --c-panel: #FAFAFA;
         --c-nav-hover: #F0F0F0;
+        --c-glow: rgba(0,0,0,0.04);
+        --c-success: #0070f3; /* Vercel blue for highlights */
         
         --f-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         --f-head: "Space Grotesk", var(--f-sans);
@@ -29,13 +31,15 @@
 
       @media (prefers-color-scheme: dark) {
         :root {
-          --c-bg: #000000;       /* Pitch black for premium feel */
-          --c-text: #EDEDED;     /* Soft white */
+          --c-bg: #000000;
+          --c-text: #EDEDED;
           --c-subtext: #888888;
           --c-accent: #FFFFFF;
-          --c-line: #222222;     /* Very subtle borders */
-          --c-panel: #0A0A0A;    /* Slightly lighter black */
+          --c-line: #222222;
+          --c-panel: #0A0A0A;
           --c-nav-hover: #111111;
+          --c-glow: rgba(255,255,255,0.06);
+          --c-success: #3291ff;
         }
       }
 
@@ -47,6 +51,8 @@
         --c-line: #EAEAEA;
         --c-panel: #FAFAFA;
         --c-nav-hover: #F0F0F0;
+        --c-glow: rgba(0,0,0,0.04);
+        --c-success: #0070f3;
       }
       
       :root[data-theme="dark"] {
@@ -57,15 +63,29 @@
         --c-line: #222222;
         --c-panel: #0A0A0A;
         --c-nav-hover: #111111;
+        --c-glow: rgba(255,255,255,0.06);
+        --c-success: #3291ff;
+      }
+
+      /* Animations */
+      @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      
+      @keyframes pulseGlow {
+        0% { box-shadow: 0 0 10px var(--c-glow); }
+        50% { box-shadow: 0 0 20px var(--c-glow); }
+        100% { box-shadow: 0 0 10px var(--c-glow); }
       }
 
       * { box-sizing: border-box; }
       
       html {
-        scroll-padding-top: var(--header-height);
+        scroll-padding-top: calc(var(--header-height) + 20px);
         scroll-behavior: smooth;
       }
-      
+
       body {
         margin: 0;
         font-family: var(--f-sans);
@@ -74,6 +94,21 @@
         line-height: 1.6;
         -webkit-font-smoothing: antialiased;
         font-size: 16px;
+        background-image: radial-gradient(circle at 50% 0%, var(--c-glow) 0%, transparent 40%);
+        background-attachment: fixed;
+      }
+
+      /* Progress Bar */
+      #progress-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 2px;
+        background: var(--c-accent); /* or var(--c-success) for color */
+        width: 0%;
+        z-index: 200;
+        transition: width 0.1s ease-out;
+        box-shadow: 0 0 10px var(--c-accent);
       }
 
       a {
@@ -86,18 +121,38 @@
         border-bottom-color: var(--c-text);
       }
       
-      /* Base Layout */
+      /* Header with Blur */
       header.fixed-header {
         position: fixed;
         top: 0;
         left: 0;
         right: 0;
         height: var(--header-height);
-        background: var(--c-bg);
+        background: rgba(var(--c-bg), 0.8); /* Not supported natively for vars, using opaque fallback */
         border-bottom: 1px solid var(--c-line);
         z-index: 100;
         display: flex;
         justify-content: center;
+      }
+      
+      @supports (backdrop-filter: blur(10px)) {
+        header.fixed-header {
+          /* background: transparent; Removed transparent background for better readability */
+           background: rgba(255, 255, 255, 0.8); /* Light mode semi-transparent */
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+        }
+         @media (prefers-color-scheme: dark) {
+             header.fixed-header {
+                  background: rgba(0, 0, 0, 0.8); /* Dark mode semi-transparent */
+             }
+         }
+          :root[data-theme="light"] header.fixed-header {
+             background: rgba(255, 255, 255, 0.8);
+         }
+          :root[data-theme="dark"] header.fixed-header {
+             background: rgba(0, 0, 0, 0.8);
+         }
       }
       
       .header-container {
@@ -109,6 +164,7 @@
         padding: 0 40px;
       }
 
+      /* Animated Logo */
       .logo {
         font-family: var(--f-head);
         font-weight: 700;
@@ -117,13 +173,37 @@
         display: flex;
         align-items: center;
         gap: 12px;
+        cursor: pointer;
+        transition: transform 0.2s;
       }
+      .logo:hover { transform: scale(1.02); }
+      .logo:active { transform: scale(0.98); }
       
       .logo-icon {
         width: 24px;
         height: 24px;
         background: var(--c-text);
-        border-radius: 4px; /* Slight rounding like Vercel/Replicate */
+        border-radius: 4px;
+        position: relative;
+        overflow: hidden;
+      }
+      
+      .logo-icon::after {
+        content: "";
+        position: absolute;
+        top: -50%;
+        left: -50%;
+        width: 200%;
+        height: 200%;
+        background: linear-gradient(45deg, transparent, rgba(255,255,255,0.3), transparent);
+        transform: rotate(45deg);
+        animation: shine 4s infinite;
+      }
+      
+      @keyframes shine {
+        0% { transform: translateX(-100%) rotate(45deg); }
+        20% { transform: translateX(100%) rotate(45deg); }
+        100% { transform: translateX(100%) rotate(45deg); }
       }
 
       nav.main-nav {
@@ -136,12 +216,30 @@
         font-size: 0.95rem;
         color: var(--c-subtext);
         font-weight: 500;
+        position: relative;
+        border-bottom: none;
       }
+      
+      nav.main-nav a::after {
+        content: "";
+        position: absolute;
+        bottom: -4px;
+        left: 0;
+        width: 0;
+        height: 1px;
+        background: var(--c-text);
+        transition: width 0.2s ease;
+      }
+      
+      nav.main-nav a:hover::after, nav.main-nav a.active::after {
+        width: 100%;
+      }
+      
       nav.main-nav a:hover, nav.main-nav a.active {
         color: var(--c-text);
       }
 
-      /* Main Page Container */
+      /* Layout */
       .page-container {
         max-width: var(--page-width);
         margin: 0 auto;
@@ -151,7 +249,7 @@
         min-height: 100vh;
       }
 
-      /* Sidebar Left */
+      /* Sidebar */
       aside.sidebar {
         padding: 60px 40px 60px 0;
         height: calc(100vh - var(--header-height));
@@ -159,7 +257,27 @@
         top: var(--header-height);
         overflow-y: auto;
         border-right: 1px solid var(--c-line);
+        /* Scrollbar styling */
+        scrollbar-width: thin;
+        scrollbar-color: var(--c-line) transparent;
       }
+      
+      /* Reveal Animation for Sidebar Items */
+      .toc a {
+        display: block;
+        padding: 6px 0;
+        font-size: 0.9rem;
+        color: var(--c-subtext);
+        transition: all 0.2s;
+        border: none;
+        opacity: 0;
+        animation: fadeUp 0.5s forwards;
+      }
+      
+      .toc a:nth-child(1) { animation-delay: 0.1s; }
+      .toc a:nth-child(2) { animation-delay: 0.15s; }
+      .toc a:nth-child(3) { animation-delay: 0.2s; }
+      .toc a:nth-child(n+4) { animation-delay: 0.25s; } /* Cap delay */
 
       .toc-title {
         font-family: var(--f-mono);
@@ -170,36 +288,31 @@
         letter-spacing: 0.05em;
         opacity: 0.6;
       }
-      
-      .toc ul { list-style: none; padding: 0; margin: 0; }
-      .toc li { margin-bottom: 4px; }
-      
-      .toc a {
-        display: block;
-        padding: 6px 0;
-        font-size: 0.9rem;
-        color: var(--c-subtext);
-        transition: color 0.2s;
-      }
-      
+
       .toc a:hover {
         color: var(--c-text);
+        transform: translateX(4px);
       }
 
-      /* Article Area */
+      /* Content Animation & Style */
       main.content {
         padding: 80px 80px;
-        max-width: 900px; /* Constrain reading width */
+        max-width: 900px;
+        animation: fadeUp 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
       }
 
-      /* Typography Setup */
       h1 {
         font-family: var(--f-head);
-        font-size: 4rem;
+        font-size: clamp(3rem, 5vw, 4.5rem);
         line-height: 1.1;
         letter-spacing: -0.05em;
         font-weight: 600;
         margin: 0 0 24px 0;
+        background: linear-gradient(to right, var(--c-text), var(--c-subtext));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        display: inline-block; /* Required for gradient text sometimes */
       }
       
       h2 {
@@ -223,7 +336,7 @@
       }
 
       p {
-        font-size: 1.1rem;
+        font-size: 1.125rem;
         color: var(--c-subtext);
         margin-bottom: 24px;
         line-height: 1.7;
@@ -231,7 +344,7 @@
       
       ul, ol {
         color: var(--c-subtext);
-        font-size: 1.1rem;
+        font-size: 1.125rem;
         padding-left: 20px;
         margin-bottom: 24px;
         line-height: 1.7;
@@ -239,19 +352,74 @@
       
       li { margin-bottom: 8px; }
 
-      /* Code Blocks */
-      pre {
+      /* Fancy Code Blocks */
+      .code-block-wrapper {
+        position: relative;
+        margin: 32px 0;
+        border-radius: 8px;
         background: var(--c-panel);
         border: 1px solid var(--c-line);
-        border-radius: 8px;
+        overflow: hidden;
+        transition: border-color 0.2s, box-shadow 0.2s;
+      }
+      
+      .code-block-wrapper:hover {
+        border-color: var(--c-text);
+        box-shadow: 0 4px 20px var(--c-glow);
+      }
+      
+      .code-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--c-line);
+        background: rgba(0,0,0,0.02);
+      }
+      
+      .code-lang {
+        font-family: var(--f-mono);
+        font-size: 0.75rem;
+        color: var(--c-subtext);
+        text-transform: uppercase;
+      }
+      
+      .copy-btn {
+        background: transparent;
+        border: 1px solid var(--c-line);
+        border-radius: 4px;
+        color: var(--c-subtext);
+        font-size: 0.75rem;
+        padding: 2px 8px;
+        cursor: pointer;
+        font-family: var(--f-sans);
+        transition: all 0.2s;
+      }
+      
+      .copy-btn:hover {
+        background: var(--c-bg);
+        color: var(--c-text);
+        border-color: var(--c-text);
+      }
+      
+      .copy-btn.copied {
+        background: var(--c-success);
+        color: white;
+        border-color: var(--c-success);
+      }
+
+      pre {
+        margin: 0;
         padding: 24px;
         font-size: 0.9rem;
         overflow-x: auto;
-        margin: 32px 0;
+        background: transparent;
+        border: none;
       }
       
       code { font-family: var(--f-mono); color: var(--c-text); }
       
+      /* Inline Code */
       :not(pre) > code {
         background: var(--c-panel);
         border: 1px solid var(--c-line);
@@ -259,6 +427,7 @@
         border-radius: 4px;
         font-size: 0.85em;
         color: var(--c-text);
+        vertical-align: middle;
       }
 
       hr {
@@ -275,6 +444,9 @@
         padding-left: 24px;
         margin: 40px 0;
         color: var(--c-text);
+        background: linear-gradient(to right, var(--c-panel), transparent);
+        padding: 16px 24px;
+        border-radius: 0 4px 4px 0;
       }
 
       /* Theme Switcher */
@@ -303,27 +475,25 @@
       
       .theme-btn:hover { color: var(--c-text); }
       .theme-btn.active {
-        background: var(--c-bg); /* Use bg color for contrast against panel */
+        background: var(--c-bg);
         color: var(--c-text);
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
       }
-      /* Dark mode button active needs inverting or lighter bg */
       :root[data-theme="dark"] .theme-btn.active {
         background: #333;
         color: white;
       }
 
-      /* Icons */
       .icon { width: 16px; height: 16px; fill: currentColor; }
 
       /* Mobile Responsive */
       @media (max-width: 1024px) {
         .page-container { display: block; }
-        aside.sidebar { display: none; } /* Hide sidebar on small screens */
+        aside.sidebar { display: none; } 
         main.content { padding: 40px 24px; max-width: 100%; }
         .header-container { padding: 0 20px; }
-        nav.main-nav { display: none; } /* Could move to hamburger later */
-        h1 { font-size: 3rem; }
+        nav.main-nav { display: none; }
+        h1 { font-size: 2.8rem; }
       }
     </style>
     <script>
@@ -341,6 +511,7 @@
     </script>
   </head>
   <body>
+    <div id="progress-bar"></div>
     <header class="fixed-header">
       <div class="header-container">
         <div class="logo">
@@ -385,6 +556,7 @@
     </div>
 
     <script>
+      // 1. Theme Management
       function setTheme(mode) {
         localStorage.setItem('theme', mode);
         updateTheme();
@@ -399,14 +571,86 @@
         
         document.documentElement.setAttribute('data-theme', effective);
         
-        // Update UI
         document.querySelectorAll('.theme-btn').forEach(btn => btn.classList.remove('active'));
         document.getElementById('btn-' + saved).classList.add('active');
+        
+        // Enhance headers with correct background if needed
+        const header = document.querySelector('header.fixed-header');
+        // header style handled by CSS transparency
       }
 
-      // Init and Listen
-      updateTheme();
+      // 2. Reading Progress Bar
+      function updateProgress() {
+        const winScroll = document.body.scrollTop || document.documentElement.scrollTop;
+        const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+        const scrolled = (winScroll / height) * 100;
+        document.getElementById("progress-bar").style.width = scrolled + "%";
+      }
+
+      // 3. Enhance Code Blocks
+      function enhanceCodeBlocks() {
+        // Only run if we haven't already
+        if (document.querySelector('.code-block-wrapper')) return;
+
+        document.querySelectorAll('pre').forEach(pre => {
+          // Wrap pre in a container relative for positioning
+          const wrapper = document.createElement('div');
+          wrapper.className = 'code-block-wrapper';
+          pre.parentNode.insertBefore(wrapper, pre);
+          wrapper.appendChild(pre);
+
+          // Create Header
+          const header = document.createElement('div');
+          header.className = 'code-header';
+          
+          // Try to guess language (dummy for static site gen unless marked)
+          // Nanoss markdown parser likely puts language class on code element
+          let lang = 'TEXT';
+          const codeEl = pre.querySelector('code');
+          if (codeEl) {
+             const classes = codeEl.className.split(' ');
+             const langClass = classes.find(c => c.startsWith('language-'));
+             if (langClass) lang = langClass.replace('language-', '');
+          }
+          
+          const langSpan = document.createElement('span');
+          langSpan.className = 'code-lang';
+          langSpan.innerText = lang.toUpperCase();
+          
+          const copyBtn = document.createElement('button');
+          copyBtn.className = 'copy-btn';
+          copyBtn.innerText = 'Copy';
+          
+          copyBtn.addEventListener('click', () => {
+            const code = pre.innerText;
+            navigator.clipboard.writeText(code).then(() => {
+              copyBtn.innerText = 'Copied!';
+              copyBtn.classList.add('copied');
+              setTimeout(() => {
+                copyBtn.innerText = 'Copy';
+                copyBtn.classList.remove('copied');
+              }, 2000);
+            });
+          });
+
+          header.appendChild(langSpan);
+          header.appendChild(copyBtn);
+          wrapper.insertBefore(header, pre);
+        });
+      }
+
+      // Init / Event Listeners
+      window.addEventListener('scroll', updateProgress);
       window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateTheme);
+      
+      document.addEventListener('DOMContentLoaded', () => {
+        updateTheme();
+        enhanceCodeBlocks();
+      });
+      
+      // Fallback for immediate run
+      updateTheme();
+      enhanceCodeBlocks();
     </script>
   </body>
 </html>
