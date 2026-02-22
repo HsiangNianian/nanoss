@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, InstancePre, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
 mod bindings {
@@ -29,7 +29,7 @@ impl Default for PluginHostConfig {
 
 struct PluginComponent {
     name: String,
-    component: Component,
+    pre: InstancePre<HostState>,
 }
 
 struct HostState {
@@ -45,7 +45,6 @@ impl bindings::nanoss::plugin::host::Host for HostState {
 pub struct PluginHost {
     config: PluginHostConfig,
     engine: Engine,
-    linker: Linker<HostState>,
     plugins: Vec<PluginComponent>,
     fuel_per_call: u64,
 }
@@ -69,19 +68,21 @@ impl PluginHost {
         for path in &config.plugin_paths {
             let component = Component::from_file(&engine, path)
                 .with_context(|| format!("failed to compile plugin component {}", path.display()))?;
+            let pre = linker
+                .instantiate_pre(&component)
+                .with_context(|| format!("failed to pre-instantiate plugin component {}", path.display()))?;
             let name = path
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("unknown-plugin")
                 .to_string();
-            plugins.push(PluginComponent { name, component });
+            plugins.push(PluginComponent { name, pre });
         }
 
         let fuel_per_call = config.timeout_ms.saturating_mul(10_000).max(100_000);
         Ok(Self {
             config,
             engine,
-            linker,
             plugins,
             fuel_per_call,
         })
@@ -90,8 +91,12 @@ impl PluginHost {
     pub fn init(&self, config_json: &str) -> Result<()> {
         for plugin in &self.plugins {
             let mut store = self.new_store()?;
-            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+            let raw_instance = plugin
+                .pre
+                .instantiate(&mut store)
                 .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            let instance = bindings::NanossPlugin::new(&mut store, &raw_instance)
+                .with_context(|| format!("failed to bind plugin exports {}", plugin.name))?;
             instance
                 .nanoss_plugin_hooks()
                 .call_init(&mut store, config_json)
@@ -104,8 +109,12 @@ impl PluginHost {
         let mut next = content;
         for plugin in &self.plugins {
             let mut store = self.new_store()?;
-            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+            let raw_instance = plugin
+                .pre
+                .instantiate(&mut store)
                 .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            let instance = bindings::NanossPlugin::new(&mut store, &raw_instance)
+                .with_context(|| format!("failed to bind plugin exports {}", plugin.name))?;
             next = instance
                 .nanoss_plugin_hooks()
                 .call_transform_markdown(&mut store, path, &next)
@@ -118,8 +127,12 @@ impl PluginHost {
         let mut next = ir_json;
         for plugin in &self.plugins {
             let mut store = self.new_store()?;
-            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+            let raw_instance = plugin
+                .pre
+                .instantiate(&mut store)
                 .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            let instance = bindings::NanossPlugin::new(&mut store, &raw_instance)
+                .with_context(|| format!("failed to bind plugin exports {}", plugin.name))?;
             next = instance
                 .nanoss_plugin_hooks()
                 .call_on_page_ir(&mut store, path, &next)
@@ -132,8 +145,12 @@ impl PluginHost {
         let mut next = html;
         for plugin in &self.plugins {
             let mut store = self.new_store()?;
-            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+            let raw_instance = plugin
+                .pre
+                .instantiate(&mut store)
                 .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            let instance = bindings::NanossPlugin::new(&mut store, &raw_instance)
+                .with_context(|| format!("failed to bind plugin exports {}", plugin.name))?;
             next = instance
                 .nanoss_plugin_hooks()
                 .call_on_post_render(&mut store, path, &next)
@@ -145,8 +162,12 @@ impl PluginHost {
     pub fn shutdown(&self) -> Result<()> {
         for plugin in &self.plugins {
             let mut store = self.new_store()?;
-            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+            let raw_instance = plugin
+                .pre
+                .instantiate(&mut store)
                 .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            let instance = bindings::NanossPlugin::new(&mut store, &raw_instance)
+                .with_context(|| format!("failed to bind plugin exports {}", plugin.name))?;
             instance
                 .nanoss_plugin_hooks()
                 .call_shutdown(&mut store)
