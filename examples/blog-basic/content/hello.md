@@ -14,3 +14,5 @@ fn main() {
     println!("hello from highlighted code");
 }
 ```
+
+<div class="flex text-red-500">Tailwind probe</div>
