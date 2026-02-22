@@ -2,16 +2,20 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use minijinja::{context, Environment};
+use nanoss_plugin_host::{PluginHost, PluginHostConfig};
 use once_cell::sync::Lazy;
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
+use rswind::create_processor;
 use reqwest::blocking::Client;
 use reqwest::{Method, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
@@ -41,14 +45,26 @@ static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 static HREF_HTTP_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new("href=[\"'](https?://[^\"']+)[\"']").expect("valid external link regex"));
+static CLASS_ATTR_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new("class=[\"']([^\"']+)[\"']").expect("valid html class attribute regex")
+});
+static ISLAND_TAG_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"<island\s+name="([^"]+)"(?:\s+props='([^']*)')?\s*></island>"#)
+        .expect("valid island regex")
+});
 
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
     pub content_dir: PathBuf,
     pub output_dir: PathBuf,
     pub template_dir: Option<PathBuf>,
+    pub plugin_paths: Vec<PathBuf>,
+    pub plugin_timeout_ms: u64,
+    pub plugin_memory_limit_mb: u64,
     pub check_external_links: bool,
     pub fail_on_broken_links: bool,
+    pub js_backend: JsBackend,
+    pub tailwind: Option<TailwindConfig>,
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +74,30 @@ pub struct BuildReport {
     pub copied_assets: usize,
     pub checked_external_links: usize,
     pub broken_external_links: usize,
+    pub processed_scripts: usize,
+    pub compiled_tailwind: bool,
+    pub island_pages: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum JsBackend {
+    Passthrough,
+    Esbuild,
+}
+
+#[derive(Debug, Clone)]
+pub struct TailwindConfig {
+    pub backend: TailwindBackend,
+    pub input_css: PathBuf,
+    pub output_css: PathBuf,
+    pub binary: String,
+    pub minify: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TailwindBackend {
+    Standalone,
+    Rswind,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -65,6 +105,13 @@ struct FrontMatter {
     title: Option<String>,
     slug: Option<String>,
     lang: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PageIr {
+    title: String,
+    content_html: String,
+    toc_html: String,
 }
 
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
@@ -76,14 +123,27 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     env.add_template("page.html", &page_template)
         .context("failed to register template")?;
 
+    let plugin_host = PluginHost::new(PluginHostConfig {
+        plugin_paths: config.plugin_paths.clone(),
+        timeout_ms: config.plugin_timeout_ms,
+        memory_limit_mb: config.plugin_memory_limit_mb,
+    })?;
+    plugin_host.init("{}")?;
+
     let mut report = BuildReport::default();
+    if let Some(tailwind) = &config.tailwind {
+        run_tailwind(tailwind, &config.content_dir)?;
+        report.compiled_tailwind = true;
+    }
+
+    let mut islands_runtime_written = false;
     for entry in WalkDir::new(&config.content_dir).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() {
             continue;
         }
         match entry.path().extension().and_then(OsStr::to_str) {
             Some("md") => {
-                let rendered = render_markdown_file(entry.path(), &env)?;
+                let rendered = render_markdown_file(entry.path(), &env, &plugin_host)?;
                 let target =
                     output_path_for(
                         entry.path(),
@@ -96,13 +156,29 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
                 }
-                fs::write(&target, rendered.html)
+                let (island_html, has_islands) = compile_islands(&rendered.html);
+                if has_islands && !islands_runtime_written {
+                    write_islands_runtime(&config.output_dir)?;
+                    islands_runtime_written = true;
+                }
+                if has_islands {
+                    report.island_pages += 1;
+                }
+                fs::write(&target, island_html)
                     .with_context(|| format!("failed to write rendered file {}", target.display()))?;
                 report.rendered_pages += 1;
             }
             Some("scss") | Some("sass") => {
                 compile_sass_file(entry.path(), &config.content_dir, &config.output_dir)?;
                 report.compiled_sass += 1;
+            }
+            Some("css") => {
+                process_css_asset(entry.path(), &config.content_dir, &config.output_dir)?;
+                report.copied_assets += 1;
+            }
+            Some("js") | Some("mjs") | Some("cjs") | Some("ts") => {
+                process_script_asset(entry.path(), &config.content_dir, &config.output_dir, config.js_backend)?;
+                report.processed_scripts += 1;
             }
             _ => {
                 copy_asset_file(entry.path(), &config.content_dir, &config.output_dir)?;
@@ -120,6 +196,8 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         }
     }
 
+    plugin_host.shutdown()?;
+
     Ok(report)
 }
 
@@ -136,24 +214,44 @@ struct TocItem {
     text: String,
 }
 
-fn render_markdown_file(path: &Path, env: &Environment<'_>) -> Result<RenderedPage> {
+fn render_markdown_file(path: &Path, env: &Environment<'_>, plugin_host: &PluginHost) -> Result<RenderedPage> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read markdown file {}", path.display()))?;
-    let (frontmatter, markdown) = parse_frontmatter(&raw).with_context(|| {
+    let transformed_raw = plugin_host
+        .transform_markdown(&path.display().to_string(), raw)
+        .with_context(|| format!("plugin transform_markdown failed for {}", path.display()))?;
+    let (frontmatter, markdown) = parse_frontmatter(&transformed_raw).with_context(|| {
         format!("failed to parse frontmatter for {}", path.display())
     })?;
 
     let (html_content, toc_items) = markdown_to_html(markdown);
-    let toc = build_toc_html(&toc_items);
     let title = frontmatter
         .title
         .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
         .unwrap_or_else(|| "Untitled".to_string());
+    let ir = PageIr {
+        title,
+        content_html: html_content,
+        toc_html: build_toc_html(&toc_items),
+    };
+    let ir_json = serde_json::to_string(&ir).context("failed to serialize page ir")?;
+    let transformed_ir_json = plugin_host
+        .on_page_ir(&path.display().to_string(), ir_json)
+        .with_context(|| format!("plugin on_page_ir failed for {}", path.display()))?;
+    let transformed_ir: PageIr =
+        serde_json::from_str(&transformed_ir_json).context("plugin returned invalid page ir json")?;
 
     let tmpl = env.get_template("page.html").context("missing page.html template")?;
-    let html = tmpl
-        .render(context! { title => title, content => html_content, toc => toc })
+    let rendered_html = tmpl
+        .render(context! {
+            title => transformed_ir.title,
+            content => transformed_ir.content_html,
+            toc => transformed_ir.toc_html
+        })
         .context("failed to render page template")?;
+    let html = plugin_host
+        .on_post_render(&path.display().to_string(), rendered_html)
+        .with_context(|| format!("plugin on_post_render failed for {}", path.display()))?;
 
     Ok(RenderedPage {
         slug: frontmatter.slug,
@@ -306,7 +404,25 @@ fn compile_sass_file(source: &Path, content_root: &Path, output_root: &Path) -> 
 
     let css = grass::from_path(source, &grass::Options::default())
         .with_context(|| format!("failed to compile Sass file {}", source.display()))?;
-    fs::write(&target, css).with_context(|| format!("failed to write Sass output {}", target.display()))?;
+    let optimized = optimize_css(source, &css)?;
+    fs::write(&target, optimized).with_context(|| format!("failed to write Sass output {}", target.display()))?;
+    Ok(())
+}
+
+fn process_css_asset(source: &Path, content_root: &Path, output_root: &Path) -> Result<()> {
+    let rel = source
+        .strip_prefix(content_root)
+        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let target = output_root.join(rel);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+    let raw_css = fs::read_to_string(source)
+        .with_context(|| format!("failed to read CSS asset {}", source.display()))?;
+    let optimized = optimize_css(source, &raw_css)?;
+    fs::write(&target, optimized)
+        .with_context(|| format!("failed to write CSS asset {}", target.display()))?;
     Ok(())
 }
 
@@ -321,6 +437,99 @@ fn copy_asset_file(source: &Path, content_root: &Path, output_root: &Path) -> Re
     }
     fs::copy(source, &target)
         .with_context(|| format!("failed to copy asset {} -> {}", source.display(), target.display()))?;
+    Ok(())
+}
+
+fn process_script_asset(source: &Path, content_root: &Path, output_root: &Path, backend: JsBackend) -> Result<()> {
+    let rel = source
+        .strip_prefix(content_root)
+        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let mut target = output_root.join(rel);
+    if source.extension().and_then(OsStr::to_str) == Some("ts") {
+        target.set_extension("js");
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+
+    match backend {
+        JsBackend::Passthrough => {
+            fs::copy(source, &target)
+                .with_context(|| format!("failed to copy script {} -> {}", source.display(), target.display()))?;
+        }
+        JsBackend::Esbuild => {
+            let status = Command::new("esbuild")
+                .arg(source)
+                .arg("--bundle")
+                .arg("--minify")
+                .arg("--outfile")
+                .arg(&target)
+                .status()
+                .with_context(|| format!("failed to execute esbuild for {}", source.display()))?;
+            if !status.success() {
+                bail!("esbuild failed for {}", source.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_tailwind(config: &TailwindConfig, content_dir: &Path) -> Result<()> {
+    match config.backend {
+        TailwindBackend::Standalone => run_tailwind_standalone(config),
+        TailwindBackend::Rswind => run_tailwind_rswind(config, content_dir),
+    }
+}
+
+fn run_tailwind_standalone(config: &TailwindConfig) -> Result<()> {
+    if let Some(parent) = config.output_css.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
+    }
+    let mut cmd = Command::new(&config.binary);
+    cmd.arg("-i")
+        .arg(&config.input_css)
+        .arg("-o")
+        .arg(&config.output_css);
+    if config.minify {
+        cmd.arg("--minify");
+    }
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to execute {}", config.binary))?;
+    if !status.success() {
+        bail!("tailwind standalone compile failed");
+    }
+    Ok(())
+}
+
+fn run_tailwind_rswind(config: &TailwindConfig, content_dir: &Path) -> Result<()> {
+    if let Some(parent) = config.output_css.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
+    }
+
+    let mut classes = Vec::new();
+    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let raw = fs::read_to_string(entry.path()).unwrap_or_default();
+        for cap in CLASS_ATTR_RE.captures_iter(&raw) {
+            if let Some(group) = cap.get(1) {
+                classes.extend(group.as_str().split_whitespace().map(ToOwned::to_owned));
+            }
+        }
+    }
+
+    let mut processor = create_processor();
+    let mut css = processor.run_with(classes.iter());
+    if config.minify {
+        css = optimize_css(&config.output_css, &css)?;
+    }
+    fs::write(&config.output_css, css)
+        .with_context(|| format!("failed to write rswind output {}", config.output_css.display()))?;
     Ok(())
 }
 
@@ -431,6 +640,77 @@ fn escape_html(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+fn compile_islands(html: &str) -> (String, bool) {
+    let mut had_islands = false;
+    let replaced = ISLAND_TAG_RE
+        .replace_all(html, |caps: &regex::Captures<'_>| {
+            had_islands = true;
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+            let props = caps.get(2).map(|m| m.as_str()).unwrap_or("{}");
+            format!(
+                "<div data-island=\"{}\" data-props='{}'></div>",
+                escape_html(name),
+                escape_html(props)
+            )
+        })
+        .into_owned();
+    if !had_islands {
+        return (replaced, false);
+    }
+    (
+        format!(
+            "{}\n<script type=\"module\" src=\"/_nanoss/islands-runtime.js\"></script>",
+            replaced
+        ),
+        true,
+    )
+}
+
+fn write_islands_runtime(output_root: &Path) -> Result<()> {
+    let runtime_path = output_root.join("_nanoss").join("islands-runtime.js");
+    if let Some(parent) = runtime_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create islands runtime parent {}", parent.display()))?;
+    }
+    let runtime = r#"const islands = document.querySelectorAll('[data-island]');
+for (const node of islands) {
+  const name = node.getAttribute('data-island');
+  const raw = node.getAttribute('data-props') || '{}';
+  let props = {};
+  try {
+    props = JSON.parse(raw);
+  } catch {
+    props = {};
+  }
+  node.textContent = `[island:${name}] hydrated with props ${JSON.stringify(props)}`;
+}
+"#;
+    fs::write(&runtime_path, runtime)
+        .with_context(|| format!("failed to write islands runtime {}", runtime_path.display()))?;
+    Ok(())
+}
+
+fn optimize_css(source: &Path, css: &str) -> Result<String> {
+    let options: ParserOptions<'static, 'static> = ParserOptions {
+        filename: source.display().to_string(),
+        ..ParserOptions::default()
+    };
+    // LightningCSS parser keeps references tied to input lifetime; for this prototype we
+    // promote the buffer to 'static per build step to keep integration straightforward.
+    let leaked_css: &'static str = Box::leak(css.to_string().into_boxed_str());
+    let output = StyleSheet::parse(
+        leaked_css,
+        options,
+    )
+    .with_context(|| format!("failed to parse CSS {}", source.display()))?
+        .to_css(PrinterOptions {
+            minify: true,
+            ..PrinterOptions::default()
+        })
+        .with_context(|| format!("failed to process CSS {}", source.display()))?;
+    Ok(output.code)
 }
 
 #[derive(Default)]
