@@ -1,0 +1,13 @@
+[package]
+name = "nanoss-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+minijinja.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+walkdir.workspace = true
