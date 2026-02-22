@@ -74,6 +74,8 @@ struct BuildArgs {
     tailwind_backend: TailwindBackendArg,
     #[arg(long, default_value_t = false)]
     enable_ai_index: bool,
+    #[arg(long)]
+    base_path: Option<String>,
 }
 
 #[derive(Clone, Args)]
@@ -167,6 +169,7 @@ enum CiProviderArg {
 struct ProjectConfig {
     plugins: ProjectPluginsConfig,
     theme: ProjectThemeConfig,
+    build: ProjectBuildConfig,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -177,6 +180,11 @@ struct ProjectPluginsConfig {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProjectThemeConfig {
     name: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProjectBuildConfig {
+    base_path: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -211,6 +219,11 @@ fn main() -> Result<()> {
 
 fn run_build(args: &BuildArgs) -> Result<()> {
     let config = load_project_config()?;
+    let base_path = args
+        .base_path
+        .clone()
+        .or_else(|| config.build.base_path.clone())
+        .unwrap_or_else(|| "/".to_string());
     let registry = load_plugin_registry()?;
 
     let mut plugin_paths = args.plugin_paths.clone();
@@ -267,6 +280,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         max_file_bytes: 10 * 1024 * 1024,
         max_total_files: 100_000,
         command_timeout_secs: 120,
+        base_path,
     })?;
     println!(
         "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",

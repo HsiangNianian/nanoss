@@ -34,7 +34,8 @@ jobs:
           cargo run -p nanoss-cli -- build \
             --content-dir docs \
             --template-dir docs-site/templates \
-            --output-dir docs-public
+            --output-dir docs-public \
+            --base-path /nanoss
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

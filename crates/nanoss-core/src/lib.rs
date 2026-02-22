@@ -81,6 +81,7 @@ pub struct BuildConfig {
     pub max_file_bytes: u64,
     pub max_total_files: usize,
     pub command_timeout_secs: u64,
+    pub base_path: String,
 }
 
 #[derive(Debug, Default)]
@@ -189,6 +190,7 @@ struct ContentEntry {
 
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     validate_build_config(config)?;
+    let base_path = normalize_base_path(&config.base_path);
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
 
@@ -262,7 +264,13 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     }
                 }
 
-                let rendered = render_markdown_file(entry.path(), &env, &plugin_host, &data_context)?;
+                let rendered = render_markdown_file(
+                    entry.path(),
+                    &env,
+                    &plugin_host,
+                    &data_context,
+                    &base_path,
+                )?;
                 let target =
                     output_path_for(
                         entry.path(),
@@ -406,7 +414,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         report.ai_indexed_pages = build_semantic_index(&config.content_dir, &config.output_dir)?;
     }
 
-    let entries = collect_content_entries(&config.content_dir, &config.output_dir)?;
+    let entries = collect_content_entries(&config.content_dir, &config.output_dir, &base_path)?;
     generate_content_organization_outputs(&entries, &config.output_dir)?;
     generate_sitemap_and_feed(&entries, &config.output_dir)?;
 
@@ -434,6 +442,7 @@ fn render_markdown_file(
     env: &Environment<'_>,
     plugin_host: &PluginHost,
     data_context: &serde_json::Value,
+    base_path: &str,
 ) -> Result<RenderedPage> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read markdown file {}", path.display()))?;
@@ -467,12 +476,15 @@ fn render_markdown_file(
             title => transformed_ir.title,
             content => transformed_ir.content_html,
             toc => transformed_ir.toc_html,
-            data => data_context
+            data => data_context,
+            base_path => base_path,
+            base_href_prefix => base_href_prefix(base_path)
         })
         .context("failed to render page template")?;
     let html = plugin_host
         .on_post_render(&path.display().to_string(), rendered_html)
         .with_context(|| format!("plugin on_post_render failed for {}", path.display()))?;
+    let html = rewrite_html_absolute_links_with_base_path(&html, base_path);
 
     Ok(RenderedPage {
         slug: frontmatter.slug,
@@ -1331,7 +1343,7 @@ fn load_data_context(content_dir: &Path) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Object(root))
 }
 
-fn collect_content_entries(content_dir: &Path, output_dir: &Path) -> Result<Vec<ContentEntry>> {
+fn collect_content_entries(content_dir: &Path, output_dir: &Path, base_path: &str) -> Result<Vec<ContentEntry>> {
     let mut entries = Vec::new();
     for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() || entry.path().extension().and_then(OsStr::to_str) != Some("md") {
@@ -1353,7 +1365,7 @@ fn collect_content_entries(content_dir: &Path, output_dir: &Path) -> Result<Vec<
             .unwrap_or(output.as_path())
             .to_string_lossy()
             .replace('\\', "/");
-        let url = format!("/{}", rel.trim_end_matches("index.html")).replace("//", "/");
+        let url = to_site_url(rel.trim_end_matches("index.html"), base_path);
         entries.push(ContentEntry {
             title: fm
                 .title
@@ -1469,7 +1481,76 @@ fn validate_build_config(config: &BuildConfig) -> Result<()> {
     if config.max_total_files == 0 {
         bail!("max_total_files must be greater than zero");
     }
+    if !config.base_path.starts_with('/') {
+        bail!("base_path must start with '/'");
+    }
     Ok(())
+}
+
+fn normalize_base_path(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+    let mut normalized = trimmed.trim_end_matches('/').to_string();
+    if !normalized.starts_with('/') {
+        normalized = format!("/{}", normalized);
+    }
+    normalized
+}
+
+fn base_href_prefix(base_path: &str) -> &str {
+    if base_path == "/" {
+        ""
+    } else {
+        base_path
+    }
+}
+
+fn with_base_path(url: &str, base_path: &str) -> String {
+    if base_path == "/" || !url.starts_with('/') || url.starts_with("//") {
+        return url.to_string();
+    }
+    if url == "/" {
+        return format!("{}/", base_path);
+    }
+    if url == base_path || url.starts_with(&format!("{}/", base_path.trim_end_matches('/'))) {
+        return url.to_string();
+    }
+    format!("{base_path}{url}")
+}
+
+fn to_site_url(path_without_root: &str, base_path: &str) -> String {
+    let raw = format!("/{}", path_without_root).replace("//", "/");
+    with_base_path(&raw, base_path)
+}
+
+fn rewrite_html_absolute_links_with_base_path(html: &str, base_path: &str) -> String {
+    if base_path == "/" {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len() + 32);
+    let mut idx = 0usize;
+    while let Some(rel) = html[idx..].find("href=\"/").or_else(|| html[idx..].find("src=\"/")) {
+        let start = idx + rel;
+        out.push_str(&html[idx..start]);
+        let attr = if html[start..].starts_with("href=\"/") { "href" } else { "src" };
+        let value_start = start + attr.len() + 2;
+        if let Some(end_quote_rel) = html[value_start..].find('"') {
+            let value_end = value_start + end_quote_rel;
+            let original = &html[value_start..value_end];
+            out.push_str(attr);
+            out.push_str("=\"");
+            out.push_str(&with_base_path(original, base_path));
+            out.push('"');
+            idx = value_end + 1;
+        } else {
+            out.push_str(&html[start..]);
+            idx = html.len();
+        }
+    }
+    out.push_str(&html[idx..]);
+    out
 }
 
 fn validate_frontmatter_size(raw: &str, limit: usize) -> Result<()> {
