@@ -1,0 +1,11 @@
+package nanoss:plugin@0.1.0;
+
+interface hooks {
+  transform-markdown: func(path: string, content: string) -> string;
+  on-page-ir: func(path: string, ir-json: string) -> string;
+  on-post-render: func(path: string, html: string) -> string;
+}
+
+world nanoss-plugin {
+  export hooks;
+}
