@@ -17,6 +17,15 @@ pub fn page_fingerprint(db: &dyn salsa::Database, source: SourceFile) -> String 
     format!("{}:{}", source.path(db).display(), content_hash(db, source))
 }
 
+#[salsa::tracked]
+pub fn combine_fingerprints(_db: &dyn salsa::Database, left: String, right: String) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(left.as_bytes());
+    hasher.update(b"|");
+    hasher.update(right.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 #[salsa::db]
 #[derive(Clone, Default)]
 pub struct QueryDb {

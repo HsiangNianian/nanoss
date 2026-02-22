@@ -38,6 +38,8 @@ enum Command {
         tailwind_minify: bool,
         #[arg(long, value_enum, default_value_t = TailwindBackendArg::Standalone)]
         tailwind_backend: TailwindBackendArg,
+        #[arg(long, default_value_t = false)]
+        enable_ai_index: bool,
     },
 }
 
@@ -70,6 +72,7 @@ fn main() -> Result<()> {
             tailwind_bin,
             tailwind_minify,
             tailwind_backend,
+            enable_ai_index,
         } => {
             let tailwind = match (tailwind_input, tailwind_output) {
                 (Some(input_css), Some(output_css)) => Some(TailwindConfig {
@@ -98,15 +101,18 @@ fn main() -> Result<()> {
                     JsBackendArg::Esbuild => JsBackend::Esbuild,
                 },
                 tailwind,
+                enable_ai_index,
             })?;
             println!(
-                "Built {} pages ({} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, tailwind: {}, checked {} external links ({} broken).",
+                "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
                 report.rendered_pages,
+                report.skipped_pages,
                 report.island_pages,
                 report.compiled_sass,
                 report.copied_assets,
                 report.processed_scripts,
                 report.compiled_tailwind,
+                report.ai_indexed_pages,
                 report.checked_external_links,
                 report.broken_external_links
             );

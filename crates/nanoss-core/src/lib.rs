@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 use minijinja::{context, Environment};
 use nanoss_plugin_host::{PluginHost, PluginHostConfig};
+use nanoss_query::{combine_fingerprints, content_hash, QueryDb, SourceFile};
 use once_cell::sync::Lazy;
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
@@ -52,6 +53,7 @@ static ISLAND_TAG_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"<island\s+name="([^"]+)"(?:\s+props='([^']*)')?\s*></island>"#)
         .expect("valid island regex")
 });
+const BUILD_CACHE_FILE: &str = ".nanoss-cache.json";
 
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -65,11 +67,13 @@ pub struct BuildConfig {
     pub fail_on_broken_links: bool,
     pub js_backend: JsBackend,
     pub tailwind: Option<TailwindConfig>,
+    pub enable_ai_index: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct BuildReport {
     pub rendered_pages: usize,
+    pub skipped_pages: usize,
     pub compiled_sass: usize,
     pub copied_assets: usize,
     pub checked_external_links: usize,
@@ -77,6 +81,7 @@ pub struct BuildReport {
     pub processed_scripts: usize,
     pub compiled_tailwind: bool,
     pub island_pages: usize,
+    pub ai_indexed_pages: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +119,24 @@ struct PageIr {
     toc_html: String,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct BuildCache {
+    pages: HashMap<String, CachePageRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachePageRecord {
+    hash: String,
+    output: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SemanticIndexDoc {
+    path: String,
+    title: String,
+    embedding: Vec<f32>,
+}
+
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
@@ -131,6 +154,10 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     plugin_host.init("{}")?;
 
     let mut report = BuildReport::default();
+    let query_db = QueryDb::default();
+    let cache_path = config.output_dir.join(BUILD_CACHE_FILE);
+    let mut build_cache = load_build_cache(&cache_path)?;
+    let dependency_hash = compute_global_dependency_hash(&query_db, config.content_dir.as_path(), config.template_dir.as_deref())?;
     if let Some(tailwind) = &config.tailwind {
         run_tailwind(tailwind, &config.content_dir)?;
         report.compiled_tailwind = true;
@@ -143,6 +170,20 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         }
         match entry.path().extension().and_then(OsStr::to_str) {
             Some("md") => {
+                let raw = fs::read_to_string(entry.path())
+                    .with_context(|| format!("failed to read markdown file {}", entry.path().display()))?;
+                let source = SourceFile::new(&query_db, entry.path().to_path_buf(), raw);
+                let page_hash = content_hash(&query_db, source);
+                let current_hash = combine_fingerprints(&query_db, page_hash, dependency_hash.clone());
+                let cache_key = entry.path().display().to_string();
+                if let Some(record) = build_cache.pages.get(&cache_key) {
+                    let cached_output = PathBuf::from(&record.output);
+                    if record.hash == current_hash && cached_output.exists() {
+                        report.skipped_pages += 1;
+                        continue;
+                    }
+                }
+
                 let rendered = render_markdown_file(entry.path(), &env, &plugin_host)?;
                 let target =
                     output_path_for(
@@ -166,6 +207,13 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 }
                 fs::write(&target, island_html)
                     .with_context(|| format!("failed to write rendered file {}", target.display()))?;
+                build_cache.pages.insert(
+                    cache_key,
+                    CachePageRecord {
+                        hash: current_hash,
+                        output: target.display().to_string(),
+                    },
+                );
                 report.rendered_pages += 1;
             }
             Some("scss") | Some("sass") => {
@@ -196,7 +244,12 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         }
     }
 
+    if config.enable_ai_index {
+        report.ai_indexed_pages = build_semantic_index(&config.content_dir, &config.output_dir)?;
+    }
+
     plugin_host.shutdown()?;
+    save_build_cache(&cache_path, &build_cache)?;
 
     Ok(report)
 }
@@ -765,6 +818,138 @@ fn check_url_status(client: &Client, url: &str) -> Option<u16> {
         Some(code) => Some(code),
         None => request_status(client, Method::GET, url),
     }
+}
+
+fn load_build_cache(path: &Path) -> Result<BuildCache> {
+    if !path.exists() {
+        return Ok(BuildCache::default());
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read build cache {}", path.display()))?;
+    let cache = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse build cache {}", path.display()))?;
+    Ok(cache)
+}
+
+fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create build cache parent {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(cache).context("failed to serialize build cache")?;
+    fs::write(path, json).with_context(|| format!("failed to write build cache {}", path.display()))?;
+    Ok(())
+}
+
+fn compute_global_dependency_hash(db: &QueryDb, content_dir: &Path, template_dir: Option<&Path>) -> Result<String> {
+    let mut hashes = Vec::new();
+    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().and_then(OsStr::to_str) == Some("md") {
+            continue;
+        }
+        let raw = read_file_for_query(entry.path());
+        let source = SourceFile::new(db, entry.path().to_path_buf(), raw);
+        let fingerprint = combine_fingerprints(
+            db,
+            entry.path().display().to_string(),
+            content_hash(db, source),
+        );
+        hashes.push(fingerprint);
+    }
+
+    if let Some(templates) = template_dir {
+        for entry in WalkDir::new(templates).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let raw = read_file_for_query(entry.path());
+            let source = SourceFile::new(db, entry.path().to_path_buf(), raw);
+            let fingerprint = combine_fingerprints(
+                db,
+                entry.path().display().to_string(),
+                content_hash(db, source),
+            );
+            hashes.push(fingerprint);
+        }
+    }
+
+    hashes.sort_unstable();
+    let mut merged = String::from("deps:v1");
+    for hash in hashes {
+        merged = combine_fingerprints(db, merged, hash);
+    }
+    Ok(merged)
+}
+
+fn read_file_for_query(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes.clone()) {
+            Ok(text) => text,
+            Err(_) => blake3::hash(&bytes).to_hex().to_string(),
+        },
+        Err(_) => String::new(),
+    }
+}
+
+fn build_semantic_index(content_dir: &Path, output_dir: &Path) -> Result<usize> {
+    let mut docs = Vec::new();
+    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().and_then(OsStr::to_str) != Some("md") {
+            continue;
+        }
+        let raw = fs::read_to_string(entry.path())
+            .with_context(|| format!("failed to read markdown for semantic index {}", entry.path().display()))?;
+        let (frontmatter, body) = parse_frontmatter(&raw)
+            .with_context(|| format!("failed to parse markdown for semantic index {}", entry.path().display()))?;
+        let title = frontmatter
+            .title
+            .or_else(|| entry.path().file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+            .unwrap_or_else(|| "Untitled".to_string());
+        let embedding = embed_text_lightweight(body, 32);
+        docs.push(SemanticIndexDoc {
+            path: entry.path().display().to_string(),
+            title,
+            embedding,
+        });
+    }
+
+    let semantic_path = output_dir.join("search").join("semantic-index.json");
+    if let Some(parent) = semantic_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create semantic index parent {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(&docs).context("failed to serialize semantic index")?;
+    fs::write(&semantic_path, json)
+        .with_context(|| format!("failed to write semantic index {}", semantic_path.display()))?;
+    Ok(docs.len())
+}
+
+fn embed_text_lightweight(text: &str, dims: usize) -> Vec<f32> {
+    let mut vec = vec![0.0f32; dims];
+    for token in text
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+    {
+        let digest = blake3::hash(token.as_bytes());
+        let bytes = digest.as_bytes();
+        for i in 0..dims {
+            let b = bytes[i % bytes.len()] as f32 / 255.0;
+            vec[i] += (b - 0.5) * 2.0;
+        }
+    }
+    let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for v in &mut vec {
+            *v /= norm;
+        }
+    }
+    vec
 }
 
 fn request_status(client: &Client, method: Method, url: &str) -> Option<u16> {
