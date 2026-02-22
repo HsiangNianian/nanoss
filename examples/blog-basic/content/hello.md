@@ -16,3 +16,5 @@ fn main() {
 ```
 
 <div class="flex text-red-500">Tailwind probe</div>
+
+<island name="counter" props='{"count":1}'></island>
