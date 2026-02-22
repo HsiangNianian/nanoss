@@ -6,8 +6,13 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+grass.workspace = true
 minijinja.workspace = true
+once_cell.workspace = true
 pulldown-cmark.workspace = true
+regex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+syntect.workspace = true
 walkdir.workspace = true
