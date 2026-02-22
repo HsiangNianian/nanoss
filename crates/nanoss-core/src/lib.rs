@@ -835,9 +835,17 @@ fn load_build_cache(path: &Path) -> Result<BuildCache> {
     }
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read build cache {}", path.display()))?;
-    let cache = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse build cache {}", path.display()))?;
-    Ok(cache)
+    match serde_json::from_str(&raw) {
+        Ok(cache) => Ok(cache),
+        Err(err) => {
+            eprintln!(
+                "warning: invalid build cache {}, resetting cache: {}",
+                path.display(),
+                err
+            );
+            Ok(BuildCache::default())
+        }
+    }
 }
 
 fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
@@ -976,9 +984,9 @@ fn normalize_ref(value: &str) -> Option<&str> {
 
 fn read_file_for_query(path: &Path) -> String {
     match fs::read(path) {
-        Ok(bytes) => match String::from_utf8(bytes.clone()) {
+        Ok(bytes) => match String::from_utf8(bytes) {
             Ok(text) => text,
-            Err(_) => blake3::hash(&bytes).to_hex().to_string(),
+            Err(err) => blake3::hash(&err.into_bytes()).to_hex().to_string(),
         },
         Err(_) => String::new(),
     }
