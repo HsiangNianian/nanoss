@@ -22,3 +22,6 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 syntect.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
