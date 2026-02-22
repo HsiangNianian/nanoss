@@ -8,3 +8,4 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 nanoss-core = { path = "../nanoss-core" }
+nanoss-plugin-host = { path = "../nanoss-plugin-host" }
