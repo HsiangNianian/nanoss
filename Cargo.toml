@@ -5,6 +5,7 @@ members = [
     "crates/nanoss-core",
     "crates/nanoss-plugin-api",
     "crates/nanoss-plugin-host",
+    "crates/nanoss-query",
 ]
 
 [workspace.package]

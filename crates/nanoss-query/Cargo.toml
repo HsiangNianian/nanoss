@@ -1,0 +1,10 @@
+[package]
+name = "nanoss-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+blake3 = "1"
+salsa = "0.24"
