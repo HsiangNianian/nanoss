@@ -213,6 +213,8 @@ struct ProjectConfig {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProjectPluginsConfig {
     enabled: BTreeSet<String>,
+    #[serde(default)]
+    config: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -377,6 +379,15 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         _ => None,
     };
 
+    let plugin_init_config_json = config
+        .plugins
+        .config
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("failed to serialize [plugins].config as JSON")?
+        .unwrap_or_else(|| "{}".to_string());
+
     let report = build_site(&BuildConfig {
         content_dir: args.content_dir.clone(),
         static_dir: args.static_dir.clone(),
@@ -384,6 +395,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         template_dir: args.template_dir.clone(),
         theme_dir: selected_theme,
         plugin_paths,
+        plugin_init_config_json,
         plugin_timeout_ms: 2_000,
         plugin_memory_limit_mb: 128,
         check_external_links: args.check_external_links,

@@ -17,6 +17,7 @@ name = "my-theme"
 
 [plugins]
 enabled = ["demo-plugin"]
+config = { env = "dev", feature_flags = ["toc", "search"] }
 ```
 
 ## Notes
@@ -30,3 +31,4 @@ enabled = ["demo-plugin"]
 - CLI override for domain: `nanoss build --site-domain https://example.com`
 - If your site is deployed at domain root, use `/` (default).
 - Plugin/theme keys are the same config entries used by `nanoss plugin` and `nanoss theme`.
+- `plugins.config` is optional and will be serialized as JSON, then passed to plugin `init(config-json)`.

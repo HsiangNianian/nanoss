@@ -71,6 +71,7 @@ pub struct BuildConfig {
     pub template_dir: Option<PathBuf>,
     pub theme_dir: Option<PathBuf>,
     pub plugin_paths: Vec<PathBuf>,
+    pub plugin_init_config_json: String,
     pub plugin_timeout_ms: u64,
     pub plugin_memory_limit_mb: u64,
     pub check_external_links: bool,
@@ -207,7 +208,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         timeout_ms: config.plugin_timeout_ms,
         memory_limit_mb: config.plugin_memory_limit_mb,
     })?;
-    plugin_host.init("{}")?;
+    plugin_host.init(&config.plugin_init_config_json)?;
 
     let mut report = BuildReport::default();
     let query_db = QueryDb::default();
