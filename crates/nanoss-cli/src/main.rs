@@ -92,6 +92,8 @@ struct ServerArgs {
     port: u16,
     #[arg(long, default_value_t = true)]
     watch: bool,
+    #[arg(long)]
+    mount_path: Option<String>,
 }
 
 #[derive(Args)]
@@ -114,6 +116,8 @@ struct GenerateCiArgs {
 struct InitArgs {
     #[arg(long, default_value = ".")]
     dir: PathBuf,
+    #[arg(long, short = 'f', default_value_t = false)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -121,6 +125,8 @@ struct NewArgs {
     #[command(subcommand)]
     kind: Option<NewCommand>,
     name: Option<String>,
+    #[arg(long, short = 'f', default_value_t = false)]
+    force: bool,
 }
 
 #[derive(Subcommand)]
@@ -198,6 +204,8 @@ struct ProjectConfig {
     theme: ProjectThemeConfig,
     #[serde(default)]
     build: ProjectBuildConfig,
+    #[serde(default)]
+    server: ProjectServerConfig,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -214,6 +222,11 @@ struct ProjectThemeConfig {
 struct ProjectBuildConfig {
     base_path: Option<String>,
     site_domain: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProjectServerConfig {
+    mount_path: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -249,24 +262,25 @@ fn main() -> Result<()> {
 }
 
 fn run_init(args: InitArgs) -> Result<()> {
-    create_site_scaffold(&args.dir)?;
+    create_site_scaffold(&args.dir, args.force)?;
     println!("Initialized Nanoss starter at {}", args.dir.display());
     Ok(())
 }
 
 fn run_new(args: NewArgs) -> Result<()> {
+    let force = args.force;
     match (args.kind, args.name) {
-        (Some(NewCommand::Site { name }), None) => create_site_scaffold(Path::new(&name)),
-        (Some(NewCommand::Theme { name }), None) => create_theme_scaffold(&name),
-        (Some(NewCommand::Page { path }), None) => create_page_scaffold(&path),
-        (Some(NewCommand::Plugin { name }), None) => create_plugin_scaffold(Path::new("plugins"), &name),
+        (Some(NewCommand::Site { name }), None) => create_new_site_scaffold(Path::new(&name), force),
+        (Some(NewCommand::Theme { name }), None) => create_theme_scaffold(&name, force),
+        (Some(NewCommand::Page { path }), None) => create_page_scaffold(&path, force),
+        (Some(NewCommand::Plugin { name }), None) => create_plugin_scaffold(Path::new("plugins"), &name, force),
         (None, Some(name)) => {
             let selected = prompt_new_kind(&name, io::stdin().lock(), io::stdout())?;
             match selected {
-                NewKind::Site => create_site_scaffold(Path::new(&name)),
-                NewKind::Theme => create_theme_scaffold(&name),
-                NewKind::Page => create_page_scaffold(&name),
-                NewKind::Plugin => create_plugin_scaffold(Path::new("plugins"), &name),
+                NewKind::Site => create_new_site_scaffold(Path::new(&name), force),
+                NewKind::Theme => create_theme_scaffold(&name, force),
+                NewKind::Page => create_page_scaffold(&name, force),
+                NewKind::Plugin => create_plugin_scaffold(Path::new("plugins"), &name, force),
             }
         }
         (None, None) => bail!("usage: nanoss new <name> or nanoss new <site|theme|page|plugin> <value>"),
@@ -409,10 +423,23 @@ fn run_server(args: ServerArgs) -> Result<()> {
     let bind_addr = format!("{}:{}", args.host, args.port);
     let server = Server::http(&bind_addr)
         .map_err(|err| anyhow::anyhow!("failed to bind server at {}: {}", bind_addr, err))?;
-    println!("Serving {} at http://{}", args.build.output_dir.display(), bind_addr);
+    let project = load_project_config()?;
+    let mount_path = normalize_mount_path(
+        args.mount_path
+            .clone()
+            .or(project.server.mount_path)
+            .as_deref()
+            .unwrap_or("/"),
+    )?;
+    println!(
+        "Serving {} at http://{}{}",
+        args.build.output_dir.display(),
+        bind_addr,
+        if mount_path == "/" { "" } else { &mount_path }
+    );
     loop {
         let request = server.recv().context("server failed to receive request")?;
-        handle_static_request(request, &args.build.output_dir)?;
+        handle_static_request(request, &args.build.output_dir, &mount_path)?;
     }
 }
 
@@ -555,7 +582,7 @@ fn run_theme(command: ThemeCommand) -> Result<()> {
             }
         }
         ThemeCommand::New { name } => {
-            create_theme_scaffold(&name)?;
+            create_theme_scaffold(&name, false)?;
         }
         ThemeCommand::Use { name } => {
             let dir = theme_dir_for(&name);
@@ -574,42 +601,62 @@ fn run_theme(command: ThemeCommand) -> Result<()> {
     Ok(())
 }
 
-fn create_site_scaffold(root: &Path) -> Result<()> {
+fn create_new_site_scaffold(root: &Path, force: bool) -> Result<()> {
+    if root.exists() && !force {
+        bail!(
+            "target directory already exists: {} (use -f/--force to continue)",
+            root.display()
+        );
+    }
+    create_site_scaffold(root, force)
+}
+
+fn create_site_scaffold(root: &Path, force: bool) -> Result<()> {
     fs::create_dir_all(root).with_context(|| format!("failed to create {}", root.display()))?;
     create_if_missing(
         &root.join(PROJECT_CONFIG_FILE),
-        "[build]\nbase_path = \"/\"\n# site_domain = \"https://example.com\"\n",
+        "[build]\nbase_path = \"/\"\n# site_domain = \"https://example.com\"\n\n[server]\n# mount_path = \"/nanoss\"\n",
+        force,
     )?;
     create_if_missing(
         &root.join("content/index.md"),
         "---\ntitle: Home\n---\n\n# Welcome to Nanoss\n\nThis site is scaffolded by `nanoss init/new`.\n",
+        force,
     )?;
-    create_if_missing(&root.join("content/styles/site.css"), starter_site_css())?;
+    create_if_missing(&root.join("content/styles/site.css"), starter_site_css(), force)?;
     create_if_missing(
         &root.join("content/scripts/site.js"),
         "console.log(\"nanoss starter loaded\");\n",
+        force,
     )?;
-    create_if_missing(&root.join("static/.gitkeep"), "")?;
-    create_if_missing(&root.join("templates/page.html"), starter_page_template())?;
+    create_if_missing(&root.join("static/.gitkeep"), "", force)?;
+    create_if_missing(&root.join("templates/page.html"), starter_page_template(), force)?;
     Ok(())
 }
 
-fn create_theme_scaffold(name: &str) -> Result<()> {
+fn create_theme_scaffold(name: &str, force: bool) -> Result<()> {
     let dir = theme_dir_for(name);
+    if dir.exists() && !force {
+        bail!(
+            "theme already exists: {} (use -f/--force to continue)",
+            dir.display()
+        );
+    }
     fs::create_dir_all(dir.join("templates")).context("failed to create theme template dir")?;
     fs::create_dir_all(dir.join("static")).context("failed to create theme static dir")?;
     create_if_missing(
         &dir.join("theme.toml"),
         &format!("name = \"{}\"\nversion = \"0.1.0\"\n", name),
+        force,
     )?;
-    create_if_missing(&dir.join("templates/page.html"), starter_theme_template())?;
-    create_if_missing(&dir.join("static/theme.css"), starter_theme_css())?;
-    create_if_missing(&dir.join("static/.gitkeep"), "")?;
+    create_if_missing(&dir.join("templates/page.html"), starter_theme_template(), force)?;
+    create_if_missing(&dir.join("static/theme.css"), starter_theme_css(), force)?;
+    create_if_missing(&dir.join("static/.gitkeep"), "", force)?;
     println!("Created theme at {}", dir.display());
     Ok(())
 }
 
-fn create_page_scaffold(path: &str) -> Result<()> {
+fn create_page_scaffold(path: &str, force: bool) -> Result<()> {
     let mut rel = PathBuf::from(path);
     if rel.extension().is_none() {
         rel.set_extension("md");
@@ -625,13 +672,19 @@ fn create_page_scaffold(path: &str) -> Result<()> {
         "---\ntitle: {}\nslug: {}\n---\n\n# {}\n\nWrite your content here.\n",
         title, stem, title
     );
-    create_if_missing(&target, &body)?;
+    create_if_missing(&target, &body, force)?;
     println!("Created page {}", target.display());
     Ok(())
 }
 
-fn create_plugin_scaffold(root: &Path, name: &str) -> Result<()> {
+fn create_plugin_scaffold(root: &Path, name: &str, force: bool) -> Result<()> {
     let dir = root.join(name);
+    if dir.exists() && !force {
+        bail!(
+            "plugin scaffold already exists: {} (use -f/--force to continue)",
+            dir.display()
+        );
+    }
     fs::create_dir_all(dir.join("src")).with_context(|| format!("failed to create {}", dir.display()))?;
     let crate_name = format!("nanoss-plugin-{}", name.replace('-', "_"));
     create_if_missing(
@@ -640,21 +693,29 @@ fn create_plugin_scaffold(root: &Path, name: &str) -> Result<()> {
             "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n",
             crate_name
         ),
+        force,
     )?;
     create_if_missing(
         &dir.join("src/lib.rs"),
         "//! Minimal Nanoss plugin scaffold.\n// TODO: implement exports based on nanoss plugin WIT bindings.\n",
+        force,
     )?;
     create_if_missing(
         &dir.join("README.md"),
         "# Nanoss Plugin Scaffold\n\nBuild this crate for wasm32 and install with `nanoss plugin install`.\n",
+        force,
     )?;
     println!("Created plugin scaffold {}", dir.display());
     Ok(())
 }
 
-fn create_if_missing(path: &Path, content: &str) -> Result<()> {
+fn create_if_missing(path: &Path, content: &str, force: bool) -> Result<()> {
     if path.exists() {
+        if force {
+            fs::write(path, content).with_context(|| format!("failed to overwrite {}", path.display()))?;
+            println!("overwrite {}", path.display());
+            return Ok(());
+        }
         println!("skip existing {}", path.display());
         return Ok(());
     }
@@ -945,9 +1006,13 @@ fn spawn_watch_thread(build: BuildArgs) -> Result<()> {
         .watch(&build.content_dir, RecursiveMode::Recursive)
         .context("failed to watch content directory")?;
     if let Some(ref template_dir) = build.template_dir {
-        watcher
-            .watch(template_dir, RecursiveMode::Recursive)
-            .context("failed to watch template directory")?;
+        if template_dir.exists() {
+            watcher
+                .watch(template_dir, RecursiveMode::Recursive)
+                .context("failed to watch template directory")?;
+        } else {
+            eprintln!("warning: template directory not found, skipping watch: {}", template_dir.display());
+        }
     }
 
     let selected_theme = load_project_config()?.theme.name;
@@ -980,8 +1045,22 @@ fn spawn_watch_thread(build: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_static_request(request: tiny_http::Request, output_dir: &Path) -> Result<()> {
-    let raw = request.url().trim_start_matches('/');
+fn handle_static_request(request: tiny_http::Request, output_dir: &Path, mount_path: &str) -> Result<()> {
+    let url_path = request
+        .url()
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .trim_start_matches('/');
+    let request_path = format!("/{}", url_path);
+    let routed = route_for_mount(&request_path, mount_path);
+    let Some(route_path) = routed else {
+        request
+            .respond(Response::empty(StatusCode(404)))
+            .context("failed to send 404 response")?;
+        return Ok(());
+    };
+    let raw = route_path.trim_start_matches('/');
     let rel = if raw.is_empty() { "index.html" } else { raw };
     let mut target = output_dir.join(rel);
     if target.is_dir() {
@@ -1001,6 +1080,30 @@ fn handle_static_request(request: tiny_http::Request, output_dir: &Path) -> Resu
         .respond(Response::from_data(bytes))
         .context("failed to send file response")?;
     Ok(())
+}
+
+fn normalize_mount_path(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return Ok("/".to_string());
+    }
+    if !trimmed.starts_with('/') {
+        bail!("mount_path must start with '/'");
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn route_for_mount(request_path: &str, mount_path: &str) -> Option<String> {
+    if mount_path == "/" {
+        return Some(request_path.to_string());
+    }
+    if request_path == mount_path {
+        return Some("/".to_string());
+    }
+    let prefix = format!("{}/", mount_path);
+    request_path
+        .strip_prefix(&prefix)
+        .map(|rest| format!("/{}", rest))
 }
 
 #[cfg(test)]
