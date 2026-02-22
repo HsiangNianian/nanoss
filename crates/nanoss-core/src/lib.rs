@@ -53,6 +53,11 @@ static ISLAND_TAG_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"<island\s+name="([^"]+)"(?:\s+props='([^']*)')?\s*></island>"#)
         .expect("valid island regex")
 });
+static MD_LINK_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).expect("valid markdown link regex")
+});
+static HTML_ASSET_ATTR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?:src|href)=["']([^"']+)["']"#).expect("valid html attr regex"));
 const BUILD_CACHE_FILE: &str = ".nanoss-cache.json";
 
 #[derive(Debug, Clone)]
@@ -157,7 +162,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     let query_db = QueryDb::default();
     let cache_path = config.output_dir.join(BUILD_CACHE_FILE);
     let mut build_cache = load_build_cache(&cache_path)?;
-    let dependency_hash = compute_global_dependency_hash(&query_db, config.content_dir.as_path(), config.template_dir.as_deref())?;
+    let template_hash = compute_template_dependency_hash(&query_db, config.template_dir.as_deref())?;
     if let Some(tailwind) = &config.tailwind {
         run_tailwind(tailwind, &config.content_dir)?;
         report.compiled_tailwind = true;
@@ -172,9 +177,13 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             Some("md") => {
                 let raw = fs::read_to_string(entry.path())
                     .with_context(|| format!("failed to read markdown file {}", entry.path().display()))?;
-                let source = SourceFile::new(&query_db, entry.path().to_path_buf(), raw);
-                let page_hash = content_hash(&query_db, source);
-                let current_hash = combine_fingerprints(&query_db, page_hash, dependency_hash.clone());
+                let current_hash = compute_page_build_hash(
+                    &query_db,
+                    entry.path(),
+                    &raw,
+                    &template_hash,
+                    &config.content_dir,
+                )?;
                 let cache_key = entry.path().display().to_string();
                 if let Some(record) = build_cache.pages.get(&cache_key) {
                     let cached_output = PathBuf::from(&record.output);
@@ -841,25 +850,8 @@ fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
     Ok(())
 }
 
-fn compute_global_dependency_hash(db: &QueryDb, content_dir: &Path, template_dir: Option<&Path>) -> Result<String> {
+fn compute_template_dependency_hash(db: &QueryDb, template_dir: Option<&Path>) -> Result<String> {
     let mut hashes = Vec::new();
-    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.path().extension().and_then(OsStr::to_str) == Some("md") {
-            continue;
-        }
-        let raw = read_file_for_query(entry.path());
-        let source = SourceFile::new(db, entry.path().to_path_buf(), raw);
-        let fingerprint = combine_fingerprints(
-            db,
-            entry.path().display().to_string(),
-            content_hash(db, source),
-        );
-        hashes.push(fingerprint);
-    }
-
     if let Some(templates) = template_dir {
         for entry in WalkDir::new(templates).into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() {
@@ -877,11 +869,109 @@ fn compute_global_dependency_hash(db: &QueryDb, content_dir: &Path, template_dir
     }
 
     hashes.sort_unstable();
-    let mut merged = String::from("deps:v1");
+    let mut merged = String::from("template-deps:v1");
     for hash in hashes {
         merged = combine_fingerprints(db, merged, hash);
     }
     Ok(merged)
+}
+
+fn compute_page_build_hash(
+    db: &QueryDb,
+    page_path: &Path,
+    markdown_raw: &str,
+    template_hash: &str,
+    content_dir: &Path,
+) -> Result<String> {
+    let source = SourceFile::new(db, page_path.to_path_buf(), markdown_raw.to_string());
+    let page_hash = content_hash(db, source);
+    let asset_hash = compute_page_asset_dependency_hash(db, page_path, markdown_raw, content_dir)?;
+    let with_assets = combine_fingerprints(db, page_hash, asset_hash);
+    Ok(combine_fingerprints(
+        db,
+        with_assets,
+        template_hash.to_string(),
+    ))
+}
+
+fn compute_page_asset_dependency_hash(
+    db: &QueryDb,
+    page_path: &Path,
+    markdown_raw: &str,
+    content_dir: &Path,
+) -> Result<String> {
+    let mut deps = discover_page_asset_dependencies(page_path, markdown_raw);
+    deps.retain(|path| path.starts_with(content_dir));
+
+    let mut hashes = Vec::new();
+    for dep in deps {
+        if dep.is_file() {
+            let raw = read_file_for_query(&dep);
+            let source = SourceFile::new(db, dep.clone(), raw);
+            let fingerprint = combine_fingerprints(
+                db,
+                dep.display().to_string(),
+                content_hash(db, source),
+            );
+            hashes.push(fingerprint);
+        }
+    }
+
+    hashes.sort_unstable();
+    let mut merged = String::from("page-assets:v1");
+    for hash in hashes {
+        merged = combine_fingerprints(db, merged, hash);
+    }
+    Ok(merged)
+}
+
+fn discover_page_asset_dependencies(page_path: &Path, markdown_raw: &str) -> Vec<PathBuf> {
+    let base_dir = page_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut deps = HashSet::new();
+    for raw in extract_asset_like_refs(markdown_raw) {
+        if is_external_ref(&raw) {
+            continue;
+        }
+        if let Some(normalized) = normalize_ref(&raw) {
+            deps.insert(base_dir.join(normalized));
+        }
+    }
+    deps.into_iter().collect()
+}
+
+fn extract_asset_like_refs(markdown_raw: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    for captures in MD_LINK_RE.captures_iter(markdown_raw) {
+        if let Some(m) = captures.get(1) {
+            refs.push(m.as_str().to_string());
+        }
+    }
+    for captures in HTML_ASSET_ATTR_RE.captures_iter(markdown_raw) {
+        if let Some(m) = captures.get(1) {
+            refs.push(m.as_str().to_string());
+        }
+    }
+    refs
+}
+
+fn is_external_ref(value: &str) -> bool {
+    value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("mailto:")
+        || value.starts_with('#')
+        || value.starts_with("//")
+        || value.starts_with("data:")
+        || value.starts_with('/')
+}
+
+fn normalize_ref(value: &str) -> Option<&str> {
+    let no_query = value.split('?').next().unwrap_or(value);
+    let no_fragment = no_query.split('#').next().unwrap_or(no_query);
+    if no_fragment.is_empty() {
+        None
+    } else {
+        Some(no_fragment)
+    }
 }
 
 fn read_file_for_query(path: &Path) -> String {
