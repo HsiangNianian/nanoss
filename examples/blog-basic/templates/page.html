@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+</head>
+<body>
+  <header>
+    <h1>Nanoss Example</h1>
+  </header>
+  <main>
+    {% if toc %}
+    <nav aria-label="Table of contents">
+      {{ toc | safe }}
+    </nav>
+    {% endif %}
+    {{ content | safe }}
+  </main>
+</body>
+</html>
