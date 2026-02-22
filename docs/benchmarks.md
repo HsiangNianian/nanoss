@@ -36,6 +36,7 @@ hyperfine --warmup 2 \
 
 - Cold build wall time (median, p95).
 - Incremental rebuild wall time (single file change).
+- Incremental rebuild with unrelated asset change (page-level dependency precision).
 - Output size (total bytes under output directory).
 - Peak memory (optional with `/usr/bin/time -v`).
 
@@ -44,4 +45,4 @@ hyperfine --warmup 2 \
 - Environment: CPU, RAM, OS, Rust/Zola versions.
 - Dataset size: page count, asset count.
 - Results table: Nanoss vs Zola for each metric.
-- Notes: plugin enabled/disabled, tailwind backend used, AI index enabled/disabled.
+- Notes: plugin enabled/disabled, tailwind backend used, AI index enabled/disabled, theme enabled/disabled.

@@ -38,3 +38,6 @@ cargo run -p nanoss-cli -- build \
 - `docs/architecture.md`
 - `docs/plugin-sdk.md`
 - `docs/benchmarks.md`
+- `docs/plugins.md`
+- `docs/themes.md`
+- `docs/cli.md`

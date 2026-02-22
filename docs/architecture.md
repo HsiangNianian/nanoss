@@ -30,6 +30,17 @@
 - `nanoss-plugin-host`: Wasmtime component host runtime.
 - `nanoss-query`: Salsa-based content hash and fingerprint query layer.
 
+## Product infrastructure
+
+- Plugin infrastructure:
+  - local plugin registry and per-project enable/disable state
+  - compatibility gate via `min_host_version`
+- Theme infrastructure:
+  - scaffold/validate/use workflow
+  - template and static asset precedence rules
+- CLI infrastructure:
+  - `build`, `server`, `deploy`, `generate-ci`, `plugin`, `theme`
+
 ## Runtime outputs
 
 - Rendered pages under `public/`.
