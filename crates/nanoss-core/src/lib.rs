@@ -203,7 +203,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     env.add_template("page.html", &page_template)
         .context("failed to register template")?;
 
-    let plugin_host = PluginHost::new(PluginHostConfig {
+    let mut plugin_host = PluginHost::new(PluginHostConfig {
         plugin_paths: config.plugin_paths.clone(),
         timeout_ms: config.plugin_timeout_ms,
         memory_limit_mb: config.plugin_memory_limit_mb,
@@ -276,7 +276,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 let rendered = render_markdown_file(
                     entry.path(),
                     &env,
-                    &plugin_host,
+                    &mut plugin_host,
                     &data_context,
                     &base_path,
                 )?;
@@ -449,7 +449,7 @@ struct TocItem {
 fn render_markdown_file(
     path: &Path,
     env: &Environment<'_>,
-    plugin_host: &PluginHost,
+    plugin_host: &mut PluginHost,
     data_context: &serde_json::Value,
     base_path: &str,
 ) -> Result<RenderedPage> {
