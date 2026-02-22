@@ -8,6 +8,10 @@ Serve the generated site locally and optionally watch for source changes.
 nanoss server --content-dir content --template-dir templates --output-dir public --host 127.0.0.1 --port 1111
 ```
 
+## `nanoss dev`
+
+`dev` is an alias of `server` with watch enabled by default.
+
 ## `nanoss deploy`
 
 Generate platform deployment config files.
@@ -26,6 +30,8 @@ Generate CI templates.
 nanoss generate-ci github --output-dir public
 nanoss generate-ci gitlab --output-dir public
 ```
+
+Generated templates include benchmark regression gate script execution (`scripts/bench_gate.sh`).
 
 ## `nanoss build` extras
 

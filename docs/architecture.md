@@ -12,6 +12,7 @@
      - `on_post_render`
    - Render markdown -> HTML with TOC, anchors, and syntax highlighting.
    - Compile islands and inject runtime when needed.
+   - Include `content/data` files into template context (`data`).
 3. For assets:
    - Sass -> CSS with `grass`, then optimize with `LightningCSS`.
    - CSS optimize with `LightningCSS`.
@@ -20,6 +21,8 @@
 4. Optional post steps:
    - External link checking.
    - Semantic index generation.
+   - Content organization outputs (posts pagination, tags, categories).
+   - SEO outputs (`sitemap.xml`, `rss.xml`).
 5. Persist build cache to `public/.nanoss-cache.json`.
 
 ## Key crates
