@@ -4,84 +4,326 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title }} | Nanoss Docs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
       :root {
-        color-scheme: dark light;
-        --bg: #0b1020;
-        --panel: #111936;
-        --panel-2: #162345;
-        --text: #e8ecf8;
-        --muted: #98a2b3;
-        --accent: #7dd3fc;
-        --line: #26314f;
+        --color-bg: #ffffff;
+        --color-bg-mute: #f8fafc;
+        --color-border: #e2e8f0;
+        --color-text: #334155;
+        --color-text-heading: #0f172a;
+        --color-primary: #2563eb;
+        --color-primary-hover: #1d4ed8;
+        --color-code-bg: #f1f5f9;
+        
+        --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+        --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+        
+        --layout-max-width: 1200px;
+        --header-height: 60px;
+        --sidebar-width: 260px;
       }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --color-bg: #0f172a;
+          --color-bg-mute: #1e293b;
+          --color-border: #334155;
+          --color-text: #94a3b8;
+          --color-text-heading: #f8fafc;
+          --color-primary: #38bdf8;
+          --color-primary-hover: #7dd3fc;
+          --color-code-bg: #1e293b;
+        }
+      }
+
       * { box-sizing: border-box; }
+      
       body {
         margin: 0;
-        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-        background: radial-gradient(circle at 20% 0%, #101a38 0%, var(--bg) 45%);
-        color: var(--text);
+        font-family: var(--font-sans);
+        background-color: var(--color-bg);
+        color: var(--color-text);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
       }
-      .container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+      /* Header */
       .topbar {
-        border-bottom: 1px solid var(--line);
-        background: rgba(11, 16, 32, 0.7);
-        backdrop-filter: blur(6px);
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        height: var(--header-height);
+        border-bottom: 1px solid var(--color-border);
+        background-color: rgba(var(--color-bg), 0.8); /* Fallback */
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
       }
-      .brand { font-weight: 700; padding: 16px 20px; letter-spacing: 0.2px; }
-      .layout {
+      
+      .topbar-inner {
+        max-width: var(--layout-max-width);
+        margin: 0 auto;
+        padding: 0 24px;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .brand {
+        font-size: 1.125rem;
+        font-weight: 700;
+        color: var(--color-text-heading);
+        text-decoration: none;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        letter-spacing: -0.02em;
+      }
+      
+      /* Layout */
+      .layout-container {
+        max-width: var(--layout-max-width);
+        margin: 0 auto;
+        padding: 0 24px;
         display: grid;
-        gap: 18px;
-        grid-template-columns: minmax(220px, 280px) 1fr;
-        padding-top: 22px;
-        padding-bottom: 36px;
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+        gap: 48px;
+        min-height: calc(100vh - var(--header-height));
       }
-      .toc-card, .content-card {
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: linear-gradient(180deg, var(--panel-2), var(--panel));
+
+      /* TOC Sidebar */
+      .sidebar {
+        padding-top: 32px;
+        position: sticky;
+        top: var(--header-height);
+        height: calc(100vh - var(--header-height));
+        overflow-y: auto;
+        border-right: 1px solid var(--color-border);
+        display: none; /* Hidden by default on mobile */
       }
-      .toc-card { padding: 14px 16px; position: sticky; top: 16px; height: fit-content; }
-      .toc-card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
-      .content-card { padding: 20px 24px; min-height: 70vh; }
-      a { color: var(--accent); text-decoration: none; }
-      a:hover { text-decoration: underline; }
-      pre { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #0b1329; }
-      code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-      @media (max-width: 900px) {
-        .layout { grid-template-columns: 1fr; }
-        .toc-card { position: static; }
+      
+      @media (min-width: 1024px) {
+        .sidebar { display: block; }
       }
-      @media (prefers-color-scheme: light) {
-        :root {
-          --bg: #f4f7fb;
-          --panel: #ffffff;
-          --panel-2: #ffffff;
-          --text: #0f172a;
-          --muted: #475569;
-          --accent: #0369a1;
-          --line: #dbe4f0;
+
+      .toc-title {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--color-text-heading);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 1rem;
+        padding-left: 1rem;
+      }
+
+      .toc ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      
+      .toc li {
+        margin-bottom: 0.25rem;
+      }
+
+      .toc a {
+        display: block;
+        color: var(--color-text);
+        text-decoration: none;
+        font-size: 0.875rem;
+        padding: 0.375rem 0 0.375rem 1rem;
+        transition: all 0.2s;
+        border-left: 2px solid transparent;
+        margin-left: -1px;
+      }
+
+      .toc a:hover {
+        color: var(--color-primary);
+        border-left-color: var(--color-border);
+        background: linear-gradient(to right, var(--color-bg-mute), transparent);
+      }
+      
+      /* Main Content */
+      .content {
+        padding-top: 32px;
+        padding-bottom: 64px;
+        min-width: 0; /* Prevent overflow */
+      }
+
+      /* Typography & Markdown Styles */
+      h1, h2, h3, h4, h5, h6 {
+        color: var(--color-text-heading);
+        font-weight: 700;
+        line-height: 1.25;
+        scroll-margin-top: calc(var(--header-height) + 24px);
+        margin-top: 2.5rem;
+        margin-bottom: 1rem;
+        letter-spacing: -0.015em;
+      }
+      
+      h1 { 
+        font-size: 2.5rem; 
+        margin-top: 0; 
+        margin-bottom: 2rem; 
+        line-height: 1.1; 
+      }
+      
+      h2 { 
+        font-size: 1.75rem; 
+        border-bottom: 1px solid var(--color-border); 
+        padding-bottom: 0.5rem; 
+      }
+      
+      h3 { font-size: 1.5rem; }
+      h4 { font-size: 1.25rem; }
+      
+      p { margin-bottom: 1.25rem; }
+      
+      a { 
+        color: var(--color-primary); 
+        text-decoration: none; 
+        font-weight: 500;
+        border-bottom: 1px solid transparent;
+        transition: border-color 0.2s;
+      }
+      
+      a:hover { 
+        color: var(--color-primary-hover); 
+        border-bottom-color: var(--color-primary-hover);
+      }
+
+      /* Code styling */
+      :not(pre) > code {
+        font-family: var(--font-mono);
+        font-size: 0.875em;
+        background-color: var(--color-code-bg);
+        padding: 0.2em 0.4em;
+        border-radius: 4px;
+        color: var(--color-primary);
+        font-weight: 500;
+      }
+      
+      pre {
+        background-color: var(--color-code-bg);
+        padding: 1.25rem;
+        border-radius: 8px;
+        overflow-x: auto;
+        margin: 1.5rem 0;
+        border: 1px solid var(--color-border);
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        line-height: 1.7;
+      }
+      
+      pre code {
+        background: transparent;
+        padding: 0;
+        color: inherit;
+        font-size: inherit;
+        border-radius: 0;
+      }
+
+      /* Blockquotes */
+      blockquote {
+        margin: 1.5rem 0;
+        padding: 1rem 1.25rem;
+        border-left: 4px solid var(--color-primary);
+        background: var(--color-bg-mute);
+        border-radius: 0 8px 8px 0;
+        color: var(--color-text-heading);
+      }
+      
+      blockquote p:last-child { margin-bottom: 0; }
+
+      /* Lists */
+      ul, ol {
+        margin-bottom: 1.25rem;
+        padding-left: 1.5rem;
+      }
+      
+      li { margin-bottom: 0.5rem; }
+      
+      li::marker { color: var(--color-text); }
+
+      /* Visuals */
+      img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 8px;
+        border: 1px solid var(--color-border);
+        margin: 1rem 0;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      }
+      
+      hr {
+        border: 0;
+        border-top: 1px solid var(--color-border);
+        margin: 3rem 0;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1.5rem 0;
+        font-size: 0.95rem;
+      }
+      
+      th, td {
+        padding: 0.75rem 1rem;
+        border: 1px solid var(--color-border);
+        text-align: left;
+      }
+      
+      th {
+        background-color: var(--color-bg-mute);
+        font-weight: 600;
+        color: var(--color-text-heading);
+      }
+      
+      tr:nth-child(even) {
+        background-color: rgba(0,0,0,0.02);
+      }
+
+      /* Mobile styles */
+      @media (max-width: 1023px) {
+        .layout-container {
+          grid-template-columns: 1fr;
+          gap: 24px;
         }
-        body { background: linear-gradient(180deg, #f7fbff 0%, var(--bg) 38%); }
-        .topbar { background: rgba(255, 255, 255, 0.75); }
-        pre { background: #f8fafc; }
+        
+        .sidebar {
+          display: none; /* Consider implementing a collapsible TOC for mobile */
+        }
+        
+        h1 { font-size: 2rem; }
       }
     </style>
   </head>
   <body>
     <header class="topbar">
-      <div class="container brand">Nanoss Docs</div>
+      <div class="topbar-inner">
+        <a href="/" class="brand">
+          Nanoss Docs
+        </a>
+      </div>
     </header>
-    <main class="container layout">
+
+    <div class="layout-container">
       {% if toc %}
-      <aside class="toc-card" aria-label="Table of contents">
-        <h2>On this page</h2>
-        {{ toc | safe }}
+      <aside class="sidebar">
+        <nav class="toc">
+          <div class="toc-title">On this page</div>
+          {{ toc | safe }}
+        </nav>
       </aside>
       {% endif %}
-      <article class="content-card">
+      
+      <main class="content">
         {{ content | safe }}
-      </article>
-    </main>
+      </main>
+    </div>
   </body>
 </html>
