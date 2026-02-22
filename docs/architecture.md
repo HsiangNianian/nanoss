@@ -51,3 +51,36 @@
   - Exposes `window.NanossIslands.register(name, handler)` and `window.NanossIslands.hydrate()`.
   - Island nodes are emitted as `<div data-island="..." data-props='...'></div>` and hydrated by registered handlers.
 - Semantic index at `public/search/semantic-index.json` when enabled.
+
+## Islands Minimal Example
+
+Write a island node in markdown：
+
+```html
+<island name="counter" props='{"start": 3}'></island>
+```
+
+<island name="counter" props='{"start": 3}'></island>
+
+
+Register the corresponding handler in the template or page script：
+
+```html
+<script type="module">
+  window.NanossIslands.register("counter", (node, props) => {
+    let count = Number(props.start ?? 0);
+    const button = document.createElement("button");
+    button.textContent = `Count: ${count}`;
+    button.addEventListener("click", () => {
+      count += 1;
+      button.textContent = `Count: ${count}`;
+    });
+    node.replaceChildren(button);
+  });
+</script>
+```
+
+Illustrate:
+
+- After `register` is executed, it will automatically attempt to mount an island with the same name.
+- You can also manually call `window.NanossIslands.hydrate()` to trigger a full mount.

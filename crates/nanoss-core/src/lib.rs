@@ -992,13 +992,28 @@ fn compile_islands(html: &str) -> (String, bool) {
     if !had_islands {
         return (replaced, false);
     }
-    (
-        format!(
-            "{}\n<script type=\"module\" src=\"/_nanoss/islands-runtime.js\"></script>",
-            replaced
-        ),
-        true,
-    )
+    (inject_islands_runtime_script(&replaced), true)
+}
+
+fn inject_islands_runtime_script(html: &str) -> String {
+    let script = "<script type=\"module\" src=\"/_nanoss/islands-runtime.js\"></script>";
+    if let Some(idx) = html.rfind("</body>") {
+        let mut out = String::with_capacity(html.len() + script.len() + 1);
+        out.push_str(&html[..idx]);
+        out.push_str(script);
+        out.push('\n');
+        out.push_str(&html[idx..]);
+        return out;
+    }
+    if let Some(idx) = html.rfind("</html>") {
+        let mut out = String::with_capacity(html.len() + script.len() + 1);
+        out.push_str(&html[..idx]);
+        out.push_str(script);
+        out.push('\n');
+        out.push_str(&html[idx..]);
+        return out;
+    }
+    format!("{}\n{}", html, script)
 }
 
 fn write_islands_runtime(output_root: &Path) -> Result<()> {
@@ -1025,6 +1040,9 @@ function mountNode(node) {
     const handler = registry.get(name);
     if (!handler) {
         node.setAttribute('data-island-pending', 'true');
+        if (!node.textContent || !node.textContent.trim()) {
+            node.textContent = `[island:${name}] waiting for register()`;
+        }
         return;
     }
 
@@ -1947,11 +1965,17 @@ mod tests {
 
     #[test]
     fn compile_islands_injects_runtime_script() {
-        let (html, has_islands) =
-            compile_islands(r#"<p>x</p><island name="counter" props='{"step":1}'></island>"#);
+        let (html, has_islands) = compile_islands(
+            r#"<!doctype html><html><body><p>x</p><island name="counter" props='{"step":1}'></island></body></html>"#,
+        );
         assert!(has_islands);
         assert!(html.contains("data-island=\"counter\""));
         assert!(html.contains("/_nanoss/islands-runtime.js"));
+        let script_pos = html
+            .find("/_nanoss/islands-runtime.js")
+            .expect("runtime script should be injected");
+        let body_close_pos = html.find("</body>").expect("should contain body close");
+        assert!(script_pos < body_close_pos, "runtime script must be before </body>");
     }
 
     #[test]

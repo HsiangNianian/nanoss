@@ -584,6 +584,19 @@
 
       .icon { width: 16px; height: 16px; fill: currentColor; }
 
+      [data-island-pending="true"] {
+        display: inline-flex;
+        align-items: center;
+        min-height: 40px;
+        padding: 8px 12px;
+        border: 1px dashed var(--c-line);
+        border-radius: 8px;
+        color: var(--c-subtext);
+        background: var(--c-panel);
+        font-family: var(--f-mono);
+        font-size: 0.85rem;
+      }
+
       /* Mobile Responsive */
       @media (max-width: 1024px) {
         .page-container { display: block; }
@@ -811,6 +824,34 @@
       document.addEventListener('DOMContentLoaded', () => {
         updateTheme();
         enhanceCodeBlocks();
+
+        const registerDocsIslands = () => {
+          if (!window.NanossIslands || typeof window.NanossIslands.register !== 'function') {
+            return false;
+          }
+          window.NanossIslands.register('counter', (node, props) => {
+            let count = Number(props.start ?? 0);
+            const button = document.createElement('button');
+            button.textContent = `Count: ${count}`;
+            button.className = 'copy-btn';
+            button.addEventListener('click', () => {
+              count += 1;
+              button.textContent = `Count: ${count}`;
+            });
+            node.replaceChildren(button);
+          });
+          return true;
+        };
+
+        if (!registerDocsIslands()) {
+          let attempts = 0;
+          const timer = setInterval(() => {
+            attempts += 1;
+            if (registerDocsIslands() || attempts >= 20) {
+              clearInterval(timer);
+            }
+          }, 50);
+        }
       });
       
       // Fallback for immediate run
