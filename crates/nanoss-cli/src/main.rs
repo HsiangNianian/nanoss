@@ -76,6 +76,8 @@ struct BuildArgs {
     enable_ai_index: bool,
     #[arg(long)]
     base_path: Option<String>,
+    #[arg(long)]
+    site_domain: Option<String>,
 }
 
 #[derive(Clone, Args)]
@@ -185,6 +187,7 @@ struct ProjectThemeConfig {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProjectBuildConfig {
     base_path: Option<String>,
+    site_domain: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -224,6 +227,10 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         .clone()
         .or_else(|| config.build.base_path.clone())
         .unwrap_or_else(|| "/".to_string());
+    let site_domain = args
+        .site_domain
+        .clone()
+        .or_else(|| config.build.site_domain.clone());
     let registry = load_plugin_registry()?;
 
     let mut plugin_paths = args.plugin_paths.clone();
@@ -281,6 +288,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         max_total_files: 100_000,
         command_timeout_secs: 120,
         base_path,
+        site_domain,
     })?;
     println!(
         "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",

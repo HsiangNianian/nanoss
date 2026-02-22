@@ -82,6 +82,7 @@ pub struct BuildConfig {
     pub max_total_files: usize,
     pub command_timeout_secs: u64,
     pub base_path: String,
+    pub site_domain: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -191,6 +192,7 @@ struct ContentEntry {
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     validate_build_config(config)?;
     let base_path = normalize_base_path(&config.base_path);
+    let site_domain = normalize_site_domain(config.site_domain.as_deref())?;
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
 
@@ -416,7 +418,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 
     let entries = collect_content_entries(&config.content_dir, &config.output_dir, &base_path)?;
     generate_content_organization_outputs(&entries, &config.output_dir)?;
-    generate_sitemap_and_feed(&entries, &config.output_dir)?;
+    generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
 
     plugin_host.shutdown()?;
     save_build_cache(&cache_path, &build_cache)?;
@@ -1440,14 +1442,17 @@ fn write_taxonomy_pages(
     Ok(())
 }
 
-fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path) -> Result<()> {
+fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path, site_domain: Option<&str>) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
     let mut sitemap =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">");
     for item in entries {
-        sitemap.push_str(&format!("<url><loc>{}</loc></url>", item.url));
+        sitemap.push_str(&format!(
+            "<url><loc>{}</loc></url>",
+            canonicalize_site_url(&item.url, site_domain)
+        ));
     }
     sitemap.push_str("</urlset>");
     fs::write(output_dir.join("sitemap.xml"), sitemap).context("failed to write sitemap.xml")?;
@@ -1459,7 +1464,7 @@ fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path) -> Res
         rss.push_str(&format!(
             "<item><title>{}</title><link>{}</link>{}</item>",
             item.title,
-            item.url,
+            canonicalize_site_url(&item.url, site_domain),
             item.date
                 .as_ref()
                 .map(|date| format!("<pubDate>{}</pubDate>", date))
