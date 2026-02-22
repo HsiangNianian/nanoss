@@ -20,6 +20,10 @@ enum Command {
         output_dir: PathBuf,
         #[arg(long)]
         template_dir: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        check_external_links: bool,
+        #[arg(long, default_value_t = false)]
+        fail_on_broken_links: bool,
     },
 }
 
@@ -31,13 +35,24 @@ fn main() -> Result<()> {
             content_dir,
             output_dir,
             template_dir,
+            check_external_links,
+            fail_on_broken_links,
         } => {
             let report = build_site(&BuildConfig {
                 content_dir,
                 output_dir,
                 template_dir,
+                check_external_links,
+                fail_on_broken_links,
             })?;
-            println!("Built {} pages.", report.rendered_pages);
+            println!(
+                "Built {} pages, compiled {} Sass files, copied {} assets, checked {} external links ({} broken).",
+                report.rendered_pages,
+                report.compiled_sass,
+                report.copied_assets,
+                report.checked_external_links,
+                report.broken_external_links
+            );
         }
     }
 
