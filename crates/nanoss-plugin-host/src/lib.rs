@@ -1,8 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use wasmtime::component::Component;
-use wasmtime::{Config, Engine};
+use wasmtime::component::{Component, Linker};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+
+mod bindings {
+    wasmtime::component::bindgen!({
+        path: "../nanoss-plugin-api/wit",
+        world: "nanoss-plugin",
+    });
+}
 
 pub struct PluginHostConfig {
     pub plugin_paths: Vec<PathBuf>,
@@ -25,9 +32,20 @@ struct PluginComponent {
     component: Component,
 }
 
+struct HostState {
+    limits: StoreLimits,
+}
+
+impl bindings::nanoss::plugin::host::Host for HostState {
+    fn log(&mut self, level: String, message: String) {
+        eprintln!("[plugin:{level}] {message}");
+    }
+}
+
 pub struct PluginHost {
     config: PluginHostConfig,
     engine: Engine,
+    linker: Linker<HostState>,
     plugins: Vec<PluginComponent>,
     fuel_per_call: u64,
 }
@@ -40,6 +58,12 @@ impl PluginHost {
         engine_config.wasm_component_model(true);
         engine_config.consume_fuel(true);
         let engine = Engine::new(&engine_config).context("failed to create wasmtime engine")?;
+        let mut linker = Linker::new(&engine);
+        bindings::NanossPlugin::add_to_linker::<HostState, wasmtime::component::HasSelf<HostState>>(
+            &mut linker,
+            |state| state,
+        )
+        .context("failed to add plugin host imports to linker")?;
 
         let mut plugins = Vec::new();
         for path in &config.plugin_paths {
@@ -57,59 +81,76 @@ impl PluginHost {
         Ok(Self {
             config,
             engine,
+            linker,
             plugins,
             fuel_per_call,
         })
     }
 
-    pub fn init(&self, _config_json: &str) -> Result<()> {
+    pub fn init(&self, config_json: &str) -> Result<()> {
         for plugin in &self.plugins {
-            self.preflight_plugin(plugin)
-                .with_context(|| format!("plugin preflight failed during init: {}", plugin.name))?;
+            let mut store = self.new_store()?;
+            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+                .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            instance
+                .nanoss_plugin_hooks()
+                .call_init(&mut store, config_json)
+                .with_context(|| format!("plugin init failed: {}", plugin.name))?;
         }
         Ok(())
     }
 
     pub fn transform_markdown(&self, path: &str, content: String) -> Result<String> {
+        let mut next = content;
         for plugin in &self.plugins {
-            self.preflight_plugin(plugin).with_context(|| {
-                format!(
-                    "plugin preflight failed before transform_markdown for {} ({path})",
-                    plugin.name
-                )
-            })?;
+            let mut store = self.new_store()?;
+            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+                .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            next = instance
+                .nanoss_plugin_hooks()
+                .call_transform_markdown(&mut store, path, &next)
+                .with_context(|| format!("plugin transform_markdown failed: {}", plugin.name))?;
         }
-        Ok(content)
+        Ok(next)
     }
 
     pub fn on_page_ir(&self, path: &str, ir_json: String) -> Result<String> {
+        let mut next = ir_json;
         for plugin in &self.plugins {
-            self.preflight_plugin(plugin).with_context(|| {
-                format!(
-                    "plugin preflight failed before on_page_ir for {} ({path})",
-                    plugin.name
-                )
-            })?;
+            let mut store = self.new_store()?;
+            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+                .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            next = instance
+                .nanoss_plugin_hooks()
+                .call_on_page_ir(&mut store, path, &next)
+                .with_context(|| format!("plugin on_page_ir failed: {}", plugin.name))?;
         }
-        Ok(ir_json)
+        Ok(next)
     }
 
     pub fn on_post_render(&self, path: &str, html: String) -> Result<String> {
+        let mut next = html;
         for plugin in &self.plugins {
-            self.preflight_plugin(plugin).with_context(|| {
-                format!(
-                    "plugin preflight failed before on_post_render for {} ({path})",
-                    plugin.name
-                )
-            })?;
+            let mut store = self.new_store()?;
+            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+                .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            next = instance
+                .nanoss_plugin_hooks()
+                .call_on_post_render(&mut store, path, &next)
+                .with_context(|| format!("plugin on_post_render failed: {}", plugin.name))?;
         }
-        Ok(html)
+        Ok(next)
     }
 
     pub fn shutdown(&self) -> Result<()> {
         for plugin in &self.plugins {
-            self.preflight_plugin(plugin)
-                .with_context(|| format!("plugin preflight failed during shutdown: {}", plugin.name))?;
+            let mut store = self.new_store()?;
+            let instance = bindings::NanossPlugin::instantiate(&mut store, &plugin.component, &self.linker)
+                .with_context(|| format!("failed to instantiate plugin {}", plugin.name))?;
+            instance
+                .nanoss_plugin_hooks()
+                .call_shutdown(&mut store)
+                .with_context(|| format!("plugin shutdown failed: {}", plugin.name))?;
         }
         Ok(())
     }
@@ -126,11 +167,20 @@ impl PluginHost {
         self.config.timeout_ms
     }
 
-    fn preflight_plugin(&self, plugin: &PluginComponent) -> Result<()> {
-        let _ = &self.engine;
-        let _ = &plugin.component;
-        let _ = self.fuel_per_call;
-        Ok(())
+    fn new_store(&self) -> Result<Store<HostState>> {
+        let mut store = Store::new(
+            &self.engine,
+            HostState {
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(self.config.memory_limit_mb.saturating_mul(1024 * 1024) as usize)
+                    .build(),
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(self.fuel_per_call)
+            .context("failed to set plugin execution fuel")?;
+        Ok(store)
     }
 }
 
