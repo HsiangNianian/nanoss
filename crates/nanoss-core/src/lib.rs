@@ -424,7 +424,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     }
 
     let entries = collect_content_entries(&config.content_dir, &config.output_dir, &base_path)?;
-    generate_content_organization_outputs(&entries, &config.output_dir)?;
+    generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
     generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
 
     plugin_host.shutdown()?;
@@ -1438,7 +1438,34 @@ fn collect_content_entries(content_dir: &Path, output_dir: &Path, base_path: &st
     Ok(entries)
 }
 
-fn generate_content_organization_outputs(entries: &[ContentEntry], output_dir: &Path) -> Result<()> {
+fn render_organization_page(
+    env: &Environment<'_>,
+    data_context: &serde_json::Value,
+    base_path: &str,
+    title: &str,
+    body_html: &str,
+) -> Result<String> {
+    let tmpl = env.get_template("page.html").context("missing page.html template")?;
+    let rendered = tmpl
+        .render(context! {
+            title => title,
+            content => body_html,
+            toc => "",
+            data => data_context,
+            base_path => base_path,
+            base_href_prefix => base_href_prefix(base_path)
+        })
+        .context("failed to render organization page template")?;
+    Ok(rewrite_html_absolute_links_with_base_path(&rendered, base_path))
+}
+
+fn generate_content_organization_outputs(
+    entries: &[ContentEntry],
+    output_dir: &Path,
+    env: &Environment<'_>,
+    data_context: &serde_json::Value,
+    base_path: &str,
+) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -1453,11 +1480,12 @@ fn generate_content_organization_outputs(entries: &[ContentEntry], output_dir: &
             posts_dir.join("page").join(page_num.to_string())
         };
         fs::create_dir_all(&page_dir).with_context(|| format!("failed to create {}", page_dir.display()))?;
-        let mut html = String::from("<!doctype html><html><body><h1>Posts</h1><ul>");
+        let mut body = String::from("<h1>Posts</h1><ul>");
         for item in chunk {
-            html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
+            body.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
         }
-        html.push_str("</ul></body></html>");
+        body.push_str("</ul>");
+        let html = render_organization_page(env, data_context, base_path, "Posts", &body)?;
         fs::write(page_dir.join("index.html"), html).with_context(|| "failed to write posts page".to_string())?;
     }
 
@@ -1471,8 +1499,15 @@ fn generate_content_organization_outputs(entries: &[ContentEntry], output_dir: &
             categories.entry(category.clone()).or_default().push(item);
         }
     }
-    write_taxonomy_pages(output_dir.join("tags"), "Tags", &tags)?;
-    write_taxonomy_pages(output_dir.join("categories"), "Categories", &categories)?;
+    write_taxonomy_pages(output_dir.join("tags"), "Tags", &tags, env, data_context, base_path)?;
+    write_taxonomy_pages(
+        output_dir.join("categories"),
+        "Categories",
+        &categories,
+        env,
+        data_context,
+        base_path,
+    )?;
     Ok(())
 }
 
@@ -1480,17 +1515,21 @@ fn write_taxonomy_pages(
     root: PathBuf,
     heading: &str,
     groups: &BTreeMap<String, Vec<&ContentEntry>>,
+    env: &Environment<'_>,
+    data_context: &serde_json::Value,
+    base_path: &str,
 ) -> Result<()> {
     fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
     for (name, entries) in groups {
         let key = slugify(name);
         let dir = root.join(&key);
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-        let mut html = format!("<!doctype html><html><body><h1>{}: {}</h1><ul>", heading, name);
+        let mut body = format!("<h1>{}: {}</h1><ul>", heading, name);
         for item in entries {
-            html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
+            body.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
         }
-        html.push_str("</ul></body></html>");
+        body.push_str("</ul>");
+        let html = render_organization_page(env, data_context, base_path, &format!("{}: {}", heading, name), &body)?;
         fs::write(dir.join("index.html"), html)
             .with_context(|| format!("failed to write taxonomy page {}", dir.display()))?;
     }

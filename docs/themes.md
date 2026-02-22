@@ -18,6 +18,8 @@ Static asset precedence:
 
 - Existing output/site assets win over theme `static` files.
 
+Content organization pages (`/posts`, `/tags/*`, `/categories/*`) are rendered through the same `page.html` template pipeline, so active theme/site templates apply consistently.
+
 ## Commands
 
 - List themes: `nanoss theme list`
