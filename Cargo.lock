@@ -2099,6 +2099,7 @@ dependencies = [
  "image",
  "lightningcss",
  "minijinja",
+ "nanoss-plugin-boundary",
  "nanoss-plugin-host",
  "nanoss-query",
  "once_cell",
@@ -2119,6 +2120,16 @@ dependencies = [
 [[package]]
 name = "nanoss-plugin-api"
 version = "0.1.0"
+
+[[package]]
+name = "nanoss-plugin-boundary"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "nanoss-plugin-host"
