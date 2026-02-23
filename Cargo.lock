@@ -2099,6 +2099,7 @@ dependencies = [
  "image",
  "lightningcss",
  "minijinja",
+ "nanoss-metrics",
  "nanoss-plugin-boundary",
  "nanoss-plugin-host",
  "nanoss-query",
@@ -2114,8 +2115,13 @@ dependencies = [
  "syntect",
  "tempfile",
  "toml 0.8.23",
+ "tracing",
  "walkdir",
 ]
+
+[[package]]
+name = "nanoss-metrics"
+version = "0.1.0"
 
 [[package]]
 name = "nanoss-plugin-api"

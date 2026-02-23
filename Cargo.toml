@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nanoss-cli",
     "crates/nanoss-core",
+    "crates/nanoss-metrics",
     "crates/nanoss-plugin-api",
     "crates/nanoss-plugin-boundary",
     "crates/nanoss-plugin-host",
@@ -34,4 +35,5 @@ syntect = "5"
 thiserror = "2"
 tiny_http = "0.12"
 toml = "0.8"
+tracing = "0.1"
 walkdir = "2"
