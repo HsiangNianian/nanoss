@@ -1,16 +1,19 @@
-use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::ports::{FileSystemPort, StdFileSystemPort};
 use crate::{BuildCache, BUILD_CACHE_SCHEMA_VERSION};
 
 pub(crate) fn load_build_cache(path: &Path) -> Result<BuildCache> {
-    if !path.exists() {
+    load_build_cache_with_fs(path, &StdFileSystemPort)
+}
+
+pub(crate) fn load_build_cache_with_fs(path: &Path, fs_port: &dyn FileSystemPort) -> Result<BuildCache> {
+    if !fs_port.exists(path) {
         return Ok(BuildCache::default());
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read build cache {}", path.display()))?;
+    let raw = fs_port.read_to_string(path)?;
     match serde_json::from_str(&raw) {
         Ok(cache) => {
             let cache: BuildCache = cache;
@@ -36,11 +39,18 @@ pub(crate) fn load_build_cache(path: &Path) -> Result<BuildCache> {
 }
 
 pub(crate) fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
+    save_build_cache_with_fs(path, cache, &StdFileSystemPort)
+}
+
+pub(crate) fn save_build_cache_with_fs(
+    path: &Path,
+    cache: &BuildCache,
+    fs_port: &dyn FileSystemPort,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create build cache parent {}", parent.display()))?;
+        fs_port.create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(cache).context("failed to serialize build cache")?;
-    fs::write(path, json).with_context(|| format!("failed to write build cache {}", path.display()))?;
+    fs_port.write_string(path, &json)?;
     Ok(())
 }
