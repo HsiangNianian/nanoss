@@ -2539,6 +2539,7 @@ mod tests {
             images: ImageBuildConfig::default(),
             remote_data_sources: BTreeMap::new(),
             i18n: I18nConfig::default(),
+            build_scope: BuildScope::Full,
         };
 
         build_site(&config)?;
@@ -2616,6 +2617,69 @@ mod tests {
         assert!(obj.contains_key("site"));
         assert!(obj.contains_key("theme"));
         assert!(obj.contains_key("build"));
+        Ok(())
+    }
+
+    #[test]
+    fn output_path_respects_i18n_default_locale_prefix_strategy() -> Result<()> {
+        let root = tempdir().context("failed to create root")?;
+        let content = root.path().join("content");
+        let output = root.path().join("public");
+        fs::create_dir_all(&content).context("failed to create content")?;
+        let source = content.join("hello.md");
+        fs::write(&source, "# Hello").context("failed to write source")?;
+
+        let i18n = I18nConfig {
+            locales: vec!["en".to_string(), "zh".to_string()],
+            default_locale: Some("en".to_string()),
+            prefix_default_locale: false,
+        };
+        let en = output_path_for(&source, &content, &output, Some("hello"), Some("en"), &i18n)?;
+        let zh = output_path_for(&source, &content, &output, Some("hello"), Some("zh"), &i18n)?;
+        assert_eq!(en, output.join("hello").join("index.html"));
+        assert_eq!(zh, output.join("zh").join("hello").join("index.html"));
+
+        let prefixed = I18nConfig {
+            locales: vec!["en".to_string(), "zh".to_string()],
+            default_locale: Some("en".to_string()),
+            prefix_default_locale: true,
+        };
+        let en_prefixed =
+            output_path_for(&source, &content, &output, Some("hello"), Some("en"), &prefixed)?;
+        assert_eq!(en_prefixed, output.join("en").join("hello").join("index.html"));
+        Ok(())
+    }
+
+    #[test]
+    fn process_image_asset_generates_webp_variant() -> Result<()> {
+        let root = tempdir().context("failed to create root")?;
+        let content = root.path().join("content");
+        let output = root.path().join("public");
+        fs::create_dir_all(&content).context("failed to create content dir")?;
+        fs::create_dir_all(&output).context("failed to create output dir")?;
+        let source = content.join("cover.png");
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
+        img.save(&source).context("failed to save source image")?;
+
+        let record = process_image_asset(
+            &source,
+            &content,
+            &output,
+            &ImageBuildConfig {
+                enabled: true,
+                generate_webp: true,
+                generate_avif: false,
+                widths: vec![8],
+            },
+        )?;
+        assert_eq!(record.width, Some(16));
+        assert!(record
+            .variants
+            .iter()
+            .any(|v| v.format == "webp" && v.width == Some(8)));
+        for variant in &record.variants {
+            assert!(PathBuf::from(&variant.output).exists());
+        }
         Ok(())
     }
 }
