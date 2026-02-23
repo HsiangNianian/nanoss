@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -14,6 +15,7 @@ use image::codecs::webp::WebPEncoder;
 use image::imageops::FilterType;
 use image::{ColorType, GenericImageView, ImageEncoder};
 use minijinja::{context, Environment};
+use nanoss_metrics::MetricsCollector;
 use nanoss_plugin_host::{PluginHost, PluginHostConfig};
 use nanoss_query::{combine_fingerprints, content_hash, QueryDb, SourceFile};
 use once_cell::sync::Lazy;
@@ -31,9 +33,14 @@ mod assets;
 mod build;
 mod cache;
 mod data;
+mod observability;
+mod organization;
+mod path;
 mod ports;
 mod render;
+mod semantic;
 mod seo;
+mod validation;
 
 const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
@@ -113,6 +120,7 @@ pub struct BuildConfig {
     pub remote_data_sources: BTreeMap<String, RemoteDataSourceConfig>,
     pub i18n: I18nConfig,
     pub build_scope: BuildScope,
+    pub metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 #[derive(Debug, Default)]
@@ -359,13 +367,14 @@ struct ContentEntry {
 
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     let build_started = Instant::now();
-    log_build_event("build_start", serde_json::json!({
+    let build_id = observability::next_build_id();
+    observability::emit_event("build.start", &build_id, serde_json::json!({
         "content_dir": config.content_dir.display().to_string(),
         "output_dir": config.output_dir.display().to_string(),
     }));
-    validate_build_config(config)?;
-    let base_path = normalize_base_path(&config.base_path);
-    let site_domain = normalize_site_domain(config.site_domain.as_deref())?;
+    validation::validate_build_config(config)?;
+    let base_path = path::normalize_base_path(&config.base_path);
+    let site_domain = path::normalize_site_domain(config.site_domain.as_deref())?;
     fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
 
@@ -436,7 +445,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             Some("md") => {
                 let raw = fs::read_to_string(entry.path())
                     .with_context(|| format!("failed to read markdown file {}", entry.path().display()))?;
-                validate_frontmatter_size(&raw, config.max_frontmatter_bytes)
+                validation::validate_frontmatter_size(&raw, config.max_frontmatter_bytes)
                     .with_context(|| format!("frontmatter too large in {}", entry.path().display()))?;
                 let current_hash = compute_page_build_hash(
                     &query_db,
@@ -464,7 +473,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     &base_path,
                 )?;
                 let target =
-                    output_path_for(
+                    path::output_path_for(
                         entry.path(),
                         &config.content_dir,
                         &config.output_dir,
@@ -498,7 +507,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             Some(ext) if is_image_extension(ext) => {
                 let hash = hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         report.copied_assets += 1;
@@ -525,7 +534,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             Some("scss") | Some("sass") => {
                 let hash = hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, Some("css"))?;
+                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, Some("css"))?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         continue;
@@ -549,7 +558,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             Some("css") => {
                 let hash = hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         continue;
@@ -568,7 +577,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             Some("js") | Some("mjs") | Some("cjs") | Some("ts") => {
                 let hash = hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = asset_output_path(
+                let target = path::asset_output_path(
                     entry.path(),
                     &config.content_dir,
                     &config.output_dir,
@@ -602,7 +611,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             _ => {
                 let hash = hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         continue;
@@ -631,23 +640,34 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     }
 
     if config.enable_ai_index {
-        report.ai_indexed_pages = build_semantic_index(&config.content_dir, &config.output_dir)?;
+        report.ai_indexed_pages = semantic::build_semantic_index(&config.content_dir, &config.output_dir)?;
     }
 
     if !matches!(config.build_scope, BuildScope::AssetsOnly { .. }) {
-        let entries = collect_content_entries(
+        let entries = organization::collect_content_entries(
             &config.content_dir,
             &config.output_dir,
             &base_path,
             &config.i18n,
         )?;
-        generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
+        organization::generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
         generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
     }
 
     plugin_host.shutdown()?;
     save_build_cache(&cache_path, &build_cache)?;
-    log_build_event("build_finish", serde_json::json!({
+    if let Some(metrics) = &config.metrics {
+        metrics.record_histogram(
+            nanoss_metrics::metric_names::BUILD_DURATION_MS,
+            build_started.elapsed().as_millis() as f64,
+            &[("status", "ok")],
+        );
+        metrics.increment_counter(
+            nanoss_metrics::metric_names::PAGES_RENDERED_TOTAL,
+            &[("status", "ok")],
+        );
+    }
+    observability::emit_event("build.finish", &build_id, serde_json::json!({
         "duration_ms": build_started.elapsed().as_millis(),
         "rendered_pages": report.rendered_pages,
         "processed_images": report.processed_images,
@@ -1798,42 +1818,7 @@ fn collect_content_entries(
     base_path: &str,
     i18n: &I18nConfig,
 ) -> Result<Vec<ContentEntry>> {
-    let mut entries = Vec::new();
-    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() || entry.path().extension().and_then(OsStr::to_str) != Some("md") {
-            continue;
-        }
-        let raw = fs::read_to_string(entry.path())
-            .with_context(|| format!("failed to read content entry {}", entry.path().display()))?;
-        let (fm, _) = parse_frontmatter(&raw)
-            .with_context(|| format!("failed to parse content entry {}", entry.path().display()))?;
-        let output = output_path_for(
-            entry.path(),
-            content_dir,
-            output_dir,
-            fm.slug.as_deref(),
-            fm.lang.as_deref(),
-            i18n,
-        )?;
-        let rel = output
-            .strip_prefix(output_dir)
-            .unwrap_or(output.as_path())
-            .to_string_lossy()
-            .replace('\\', "/");
-        let url = to_site_url(rel.trim_end_matches("index.html"), base_path);
-        entries.push(ContentEntry {
-            title: fm
-                .title
-                .or_else(|| entry.path().file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
-                .unwrap_or_else(|| "Untitled".to_string()),
-            url,
-            date: fm.date,
-            tags: fm.tags.unwrap_or_default(),
-            categories: fm.categories.unwrap_or_default(),
-        });
-    }
-    entries.sort_by(|a, b| b.date.cmp(&a.date));
-    Ok(entries)
+    organization::collect_content_entries(content_dir, output_dir, base_path, i18n)
 }
 
 fn render_organization_page(
@@ -1843,21 +1828,7 @@ fn render_organization_page(
     title: &str,
     body_html: &str,
 ) -> Result<String> {
-    let tmpl = env.get_template("page.html").context("missing page.html template")?;
-    let rendered = tmpl
-        .render(context! {
-            title => title,
-            content => body_html,
-            toc => "",
-            data => data_context,
-            images => serde_json::json!({"list": []}),
-            alternates => Vec::<serde_json::Value>::new(),
-            locale => "und",
-            base_path => base_path,
-            base_href_prefix => base_href_prefix(base_path)
-        })
-        .context("failed to render organization page template")?;
-    Ok(rewrite_html_absolute_links_with_base_path(&rendered, base_path))
+    organization::render_organization_page(env, data_context, base_path, title, body_html)
 }
 
 fn generate_content_organization_outputs(
@@ -1867,49 +1838,7 @@ fn generate_content_organization_outputs(
     data_context: &serde_json::Value,
     base_path: &str,
 ) -> Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let posts_dir = output_dir.join("posts");
-    fs::create_dir_all(&posts_dir).with_context(|| format!("failed to create {}", posts_dir.display()))?;
-    let per_page = 10usize;
-    for (idx, chunk) in entries.chunks(per_page).enumerate() {
-        let page_num = idx + 1;
-        let page_dir = if page_num == 1 {
-            posts_dir.clone()
-        } else {
-            posts_dir.join("page").join(page_num.to_string())
-        };
-        fs::create_dir_all(&page_dir).with_context(|| format!("failed to create {}", page_dir.display()))?;
-        let mut body = String::from("<h1>Posts</h1><ul>");
-        for item in chunk {
-            body.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
-        }
-        body.push_str("</ul>");
-        let html = render_organization_page(env, data_context, base_path, "Posts", &body)?;
-        fs::write(page_dir.join("index.html"), html).with_context(|| "failed to write posts page".to_string())?;
-    }
-
-    let mut tags: BTreeMap<String, Vec<&ContentEntry>> = BTreeMap::new();
-    let mut categories: BTreeMap<String, Vec<&ContentEntry>> = BTreeMap::new();
-    for item in entries {
-        for tag in &item.tags {
-            tags.entry(tag.clone()).or_default().push(item);
-        }
-        for category in &item.categories {
-            categories.entry(category.clone()).or_default().push(item);
-        }
-    }
-    write_taxonomy_pages(output_dir.join("tags"), "Tags", &tags, env, data_context, base_path)?;
-    write_taxonomy_pages(
-        output_dir.join("categories"),
-        "Categories",
-        &categories,
-        env,
-        data_context,
-        base_path,
-    )?;
-    Ok(())
+    organization::generate_content_organization_outputs(entries, output_dir, env, data_context, base_path)
 }
 
 fn write_taxonomy_pages(
@@ -1920,21 +1849,7 @@ fn write_taxonomy_pages(
     data_context: &serde_json::Value,
     base_path: &str,
 ) -> Result<()> {
-    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
-    for (name, entries) in groups {
-        let key = slugify(name);
-        let dir = root.join(&key);
-        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-        let mut body = format!("<h1>{}: {}</h1><ul>", heading, name);
-        for item in entries {
-            body.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
-        }
-        body.push_str("</ul>");
-        let html = render_organization_page(env, data_context, base_path, &format!("{}: {}", heading, name), &body)?;
-        fs::write(dir.join("index.html"), html)
-            .with_context(|| format!("failed to write taxonomy page {}", dir.display()))?;
-    }
-    Ok(())
+    organization::write_taxonomy_pages(root, heading, groups, env, data_context, base_path)
 }
 
 fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path, site_domain: Option<&str>) -> Result<()> {
@@ -1942,133 +1857,39 @@ fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path, site_d
 }
 
 fn validate_build_config(config: &BuildConfig) -> Result<()> {
-    if config.max_frontmatter_bytes == 0 {
-        bail!("max_frontmatter_bytes must be greater than zero");
-    }
-    if config.max_file_bytes == 0 {
-        bail!("max_file_bytes must be greater than zero");
-    }
-    if config.max_total_files == 0 {
-        bail!("max_total_files must be greater than zero");
-    }
-    if !config.base_path.starts_with('/') {
-        bail!("base_path must start with '/'");
-    }
-    for width in &config.images.widths {
-        if *width == 0 {
-            bail!("image width variants must be > 0");
-        }
-    }
-    if let Some(default_locale) = config.i18n.default_locale.as_deref() {
-        validate_route_segment(default_locale, "default_locale")?;
-    }
-    for locale in &config.i18n.locales {
-        validate_route_segment(locale, "locale")?;
-    }
-    Ok(())
+    validation::validate_build_config(config)
 }
 
 fn normalize_base_path(input: &str) -> String {
-    let trimmed = input.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return "/".to_string();
-    }
-    let mut normalized = trimmed.trim_end_matches('/').to_string();
-    if !normalized.starts_with('/') {
-        normalized = format!("/{}", normalized);
-    }
-    normalized
+    path::normalize_base_path(input)
 }
 
 fn normalize_site_domain(input: Option<&str>) -> Result<Option<String>> {
-    let Some(raw) = input else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-        bail!("site_domain must start with http:// or https://");
-    }
-    Ok(Some(trimmed.trim_end_matches('/').to_string()))
+    path::normalize_site_domain(input)
 }
 
 fn base_href_prefix(base_path: &str) -> &str {
-    if base_path == "/" {
-        ""
-    } else {
-        base_path
-    }
+    path::base_href_prefix(base_path)
 }
 
 fn with_base_path(url: &str, base_path: &str) -> String {
-    if base_path == "/" || !url.starts_with('/') || url.starts_with("//") {
-        return url.to_string();
-    }
-    if url == "/" {
-        return format!("{}/", base_path);
-    }
-    if url == base_path || url.starts_with(&format!("{}/", base_path.trim_end_matches('/'))) {
-        return url.to_string();
-    }
-    format!("{base_path}{url}")
+    path::with_base_path(url, base_path)
 }
 
 fn to_site_url(path_without_root: &str, base_path: &str) -> String {
-    let raw = format!("/{}", path_without_root).replace("//", "/");
-    with_base_path(&raw, base_path)
+    path::to_site_url(path_without_root, base_path)
 }
 
 fn canonicalize_site_url(path: &str, site_domain: Option<&str>) -> String {
-    if path.starts_with("http://") || path.starts_with("https://") {
-        return path.to_string();
-    }
-    if let Some(domain) = site_domain {
-        return format!("{domain}{path}");
-    }
-    path.to_string()
+    path::canonicalize_site_url(path, site_domain)
 }
 
 fn rewrite_html_absolute_links_with_base_path(html: &str, base_path: &str) -> String {
-    if base_path == "/" {
-        return html.to_string();
-    }
-    let mut out = String::with_capacity(html.len() + 32);
-    let mut idx = 0usize;
-    while let Some(rel) = html[idx..].find("href=\"/").or_else(|| html[idx..].find("src=\"/")) {
-        let start = idx + rel;
-        out.push_str(&html[idx..start]);
-        let attr = if html[start..].starts_with("href=\"/") { "href" } else { "src" };
-        let value_start = start + attr.len() + 2;
-        if let Some(end_quote_rel) = html[value_start..].find('"') {
-            let value_end = value_start + end_quote_rel;
-            let original = &html[value_start..value_end];
-            out.push_str(attr);
-            out.push_str("=\"");
-            out.push_str(&with_base_path(original, base_path));
-            out.push('"');
-            idx = value_end + 1;
-        } else {
-            out.push_str(&html[start..]);
-            idx = html.len();
-        }
-    }
-    out.push_str(&html[idx..]);
-    out
+    path::rewrite_html_absolute_links_with_base_path(html, base_path)
 }
 
 fn validate_frontmatter_size(raw: &str, limit: usize) -> Result<()> {
-    if !raw.starts_with("---\n") {
-        return Ok(());
-    }
-    let remainder = &raw[4..];
-    if let Some(end) = remainder.find("\n---\n") {
-        if end > limit {
-            bail!("frontmatter size {} exceeds limit {}", end, limit);
-        }
-    }
-    Ok(())
+    validation::validate_frontmatter_size(raw, limit)
 }
 
 fn hashed_file_content(path: &Path) -> String {
@@ -2079,51 +1900,19 @@ fn hashed_file_content(path: &Path) -> String {
 }
 
 fn asset_output_path(source: &Path, content_root: &Path, output_root: &Path, force_ext: Option<&str>) -> Result<PathBuf> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let mut target = output_root.join(rel);
-    if let Some(ext) = force_ext {
-        target.set_extension(ext);
-    }
-    ensure_inside_output(output_root, &target)?;
-    Ok(target)
+    path::asset_output_path(source, content_root, output_root, force_ext)
 }
 
 fn validate_route_segment(value: &str, field: &str) -> Result<()> {
-    if value.is_empty() {
-        bail!("{field} cannot be empty");
-    }
-    if value.contains("..") || value.contains('/') || value.contains('\\') {
-        bail!("{field} contains invalid path traversal characters");
-    }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!("{field} may only contain [a-zA-Z0-9_-]");
-    }
-    Ok(())
+    validation::validate_route_segment(value, field)
 }
 
 fn ensure_inside_output(output_root: &Path, candidate: &Path) -> Result<()> {
-    if !candidate.starts_with(output_root) {
-        bail!(
-            "target path escapes output directory: {}",
-            candidate.display()
-        );
-    }
-    Ok(())
+    validation::ensure_inside_output(output_root, candidate)
 }
 
 fn ensure_binary_name_safe(binary: &str) -> Result<()> {
-    if binary.trim().is_empty() {
-        bail!("binary name cannot be empty");
-    }
-    if binary.contains('\n') || binary.contains('\r') {
-        bail!("binary name contains invalid control characters");
-    }
-    Ok(())
+    validation::ensure_binary_name_safe(binary)
 }
 
 fn wait_child_with_timeout(child: &mut Child, timeout_secs: u64) -> Result<ExitStatus> {
