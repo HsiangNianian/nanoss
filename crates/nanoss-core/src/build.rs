@@ -5,16 +5,19 @@ use crate::BuildScope;
 
 pub(crate) fn scope_paths_set(scope: &BuildScope) -> HashSet<String> {
     match scope {
-        BuildScope::AssetsOnly { paths } => paths
-            .iter()
-            .map(|path| normalize_fs_path(path))
-            .collect(),
+        BuildScope::AssetsOnly { paths } => {
+            paths.iter().map(|path| normalize_fs_path(path)).collect()
+        }
         BuildScope::SinglePage { path } => std::iter::once(normalize_fs_path(path)).collect(),
         BuildScope::Full => HashSet::new(),
     }
 }
 
-pub(crate) fn scope_includes_entry(scope: &BuildScope, scope_paths: &HashSet<String>, path: &Path) -> bool {
+pub(crate) fn scope_includes_entry(
+    scope: &BuildScope,
+    scope_paths: &HashSet<String>,
+    path: &Path,
+) -> bool {
     match scope {
         BuildScope::Full => true,
         BuildScope::SinglePage { .. } => {

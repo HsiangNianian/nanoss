@@ -40,6 +40,11 @@ struct HostState {
 
 impl bindings::nanoss::plugin::host::Host for HostState {
     fn log(&mut self, level: String, message: String) {
+        tracing::info!(
+            event_name = "plugin.hook.host_log",
+            level = %level,
+            message = %message
+        );
         eprintln!(
             "{{\"component\":\"plugin\",\"hook\":\"host.log\",\"status\":\"{}\",\"message\":{}}}",
             level,
@@ -78,11 +83,15 @@ impl PluginHost {
         let fuel_per_call = config.timeout_ms.saturating_mul(10_000).max(100_000);
         let mut plugins = Vec::new();
         for path in &config.plugin_paths {
-            let component = Component::from_file(&engine, path)
-                .with_context(|| format!("failed to compile plugin component {}", path.display()))?;
-            let pre = linker
-                .instantiate_pre(&component)
-                .with_context(|| format!("failed to pre-instantiate plugin component {}", path.display()))?;
+            let component = Component::from_file(&engine, path).with_context(|| {
+                format!("failed to compile plugin component {}", path.display())
+            })?;
+            let pre = linker.instantiate_pre(&component).with_context(|| {
+                format!(
+                    "failed to pre-instantiate plugin component {}",
+                    path.display()
+                )
+            })?;
             let name = path
                 .file_name()
                 .and_then(|value| value.to_str())
@@ -161,7 +170,12 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_on_page_ir(&mut plugin.store, path, &next)
                 .with_context(|| format!("plugin on_page_ir failed: {}", plugin.name))?;
-            log_plugin_event(&plugin.name, "on_page_ir", started.elapsed().as_millis(), "ok");
+            log_plugin_event(
+                &plugin.name,
+                "on_page_ir",
+                started.elapsed().as_millis(),
+                "ok",
+            );
         }
         Ok(next)
     }
@@ -201,7 +215,12 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_shutdown(&mut plugin.store)
                 .with_context(|| format!("plugin shutdown failed: {}", plugin.name))?;
-            log_plugin_event(&plugin.name, "shutdown", started.elapsed().as_millis(), "ok");
+            log_plugin_event(
+                &plugin.name,
+                "shutdown",
+                started.elapsed().as_millis(),
+                "ok",
+            );
         }
         Ok(())
     }
@@ -225,18 +244,21 @@ impl PluginHost {
         }
         versions
     }
-
 }
 
-fn create_store(engine: &Engine, config: &PluginHostConfig, fuel_per_call: u64) -> Result<Store<HostState>> {
+fn create_store(
+    engine: &Engine,
+    config: &PluginHostConfig,
+    fuel_per_call: u64,
+) -> Result<Store<HostState>> {
     let mut store = Store::new(
-            engine,
-            HostState {
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(config.memory_limit_mb.saturating_mul(1024 * 1024) as usize)
-                    .build(),
-            },
-        );
+        engine,
+        HostState {
+            limits: StoreLimitsBuilder::new()
+                .memory_size(config.memory_limit_mb.saturating_mul(1024 * 1024) as usize)
+                .build(),
+        },
+    );
     store.limiter(|state| &mut state.limits);
     store
         .set_fuel(fuel_per_call)
@@ -250,7 +272,10 @@ fn validate_paths(paths: &[PathBuf]) -> Result<()> {
             bail!("plugin not found: {}", plugin.display());
         }
         if !is_component_candidate(plugin) {
-            bail!("plugin must be a .wasm component file: {}", plugin.display());
+            bail!(
+                "plugin must be a .wasm component file: {}",
+                plugin.display()
+            );
         }
     }
     Ok(())
@@ -261,6 +286,13 @@ fn is_component_candidate(path: &Path) -> bool {
 }
 
 fn log_plugin_event(plugin: &str, hook: &str, duration_ms: u128, status: &str) {
+    tracing::info!(
+        event_name = "plugin.hook",
+        plugin = plugin,
+        hook = hook,
+        duration_ms = duration_ms as u64,
+        status = status
+    );
     eprintln!(
         "{{\"component\":\"plugin\",\"plugin\":\"{}\",\"hook\":\"{}\",\"duration_ms\":{},\"status\":\"{}\"}}",
         plugin, hook, duration_ms, status

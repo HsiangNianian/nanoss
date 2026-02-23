@@ -2,30 +2,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context, Result};
-use lightningcss::stylesheet::{ParserFlags, ParserOptions, PrinterOptions, StyleSheet};
-use image::codecs::avif::AvifEncoder;
-use image::codecs::webp::WebPEncoder;
-use image::imageops::FilterType;
-use image::{ColorType, GenericImageView, ImageEncoder};
-use minijinja::{context, Environment};
+use anyhow::{bail, Context, Result};
+use minijinja::Environment;
 use nanoss_metrics::MetricsCollector;
 use nanoss_plugin_host::{PluginHost, PluginHostConfig};
 use nanoss_query::{combine_fingerprints, content_hash, QueryDb, SourceFile};
 use once_cell::sync::Lazy;
-use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
-use rayon::prelude::*;
-use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use syntect::highlighting::ThemeSet;
-use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
 use walkdir::WalkDir;
 
@@ -40,6 +28,7 @@ mod ports;
 mod render;
 mod semantic;
 mod seo;
+mod utils;
 mod validation;
 
 const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
@@ -75,10 +64,13 @@ const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
 </html>
 "#;
 
+#[allow(dead_code)]
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
+#[allow(dead_code)]
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
-static HREF_HTTP_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new("href=[\"'](https?://[^\"']+)[\"']").expect("valid external link regex"));
+static HREF_HTTP_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new("href=[\"'](https?://[^\"']+)[\"']").expect("valid external link regex")
+});
 static CLASS_ATTR_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new("class=[\"']([^\"']+)[\"']").expect("valid html class attribute regex")
 });
@@ -94,7 +86,7 @@ static HTML_ASSET_ATTR_RE: Lazy<Regex> =
 const BUILD_CACHE_FILE: &str = ".nanoss-cache.json";
 const BUILD_CACHE_SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BuildConfig {
     pub content_dir: PathBuf,
     pub static_dir: PathBuf,
@@ -142,8 +134,12 @@ pub struct BuildReport {
 pub enum BuildScope {
     #[default]
     Full,
-    SinglePage { path: PathBuf },
-    AssetsOnly { paths: Vec<PathBuf> },
+    SinglePage {
+        path: PathBuf,
+    },
+    AssetsOnly {
+        paths: Vec<PathBuf>,
+    },
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -245,21 +241,11 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct I18nConfig {
     pub locales: Vec<String>,
     pub default_locale: Option<String>,
     pub prefix_default_locale: bool,
-}
-
-impl Default for I18nConfig {
-    fn default() -> Self {
-        Self {
-            locales: Vec::new(),
-            default_locale: None,
-            prefix_default_locale: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -368,18 +354,27 @@ struct ContentEntry {
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     let build_started = Instant::now();
     let build_id = observability::next_build_id();
-    observability::emit_event("build.start", &build_id, serde_json::json!({
-        "content_dir": config.content_dir.display().to_string(),
-        "output_dir": config.output_dir.display().to_string(),
-    }));
+    observability::emit_event(
+        "build.start",
+        &build_id,
+        serde_json::json!({
+            "content_dir": config.content_dir.display().to_string(),
+            "output_dir": config.output_dir.display().to_string(),
+        }),
+    );
     validation::validate_build_config(config)?;
     let base_path = path::normalize_base_path(&config.base_path);
     let site_domain = path::normalize_site_domain(config.site_domain.as_deref())?;
-    fs::create_dir_all(&config.output_dir)
-        .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
+    fs::create_dir_all(&config.output_dir).with_context(|| {
+        format!(
+            "failed to create output directory {}",
+            config.output_dir.display()
+        )
+    })?;
 
     let mut env = Environment::new();
-    let templates = load_templates(config.template_dir.as_deref(), config.theme_dir.as_deref())?;
+    let templates =
+        render::load_templates(config.template_dir.as_deref(), config.theme_dir.as_deref())?;
     for (name, source) in &templates {
         env.add_template(name, source)
             .with_context(|| format!("failed to register template {name}"))?;
@@ -394,29 +389,32 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 
     let mut report = BuildReport::default();
     let query_db = QueryDb::default();
-    let data_context = load_data_context(
+    let data_context = data::load_data_context(
         &config.content_dir,
         &config.output_dir,
         &config.remote_data_sources,
     )?;
     let cache_path = config.output_dir.join(BUILD_CACHE_FILE);
-    let mut build_cache = load_build_cache(&cache_path)?;
-    let template_hash = compute_template_dependency_hash(
+    let mut build_cache = cache::load_build_cache(&cache_path)?;
+    let template_hash = utils::compute_template_dependency_hash(
         &query_db,
         config.template_dir.as_deref(),
         config.theme_dir.as_deref(),
     )?;
     if let Some(tailwind) = &config.tailwind {
-        run_tailwind(tailwind, &config.content_dir, config.command_timeout_secs)?;
+        assets::run_tailwind(tailwind, &config.content_dir, config.command_timeout_secs)?;
         report.compiled_tailwind = true;
     }
-    copy_site_static_assets(&config.static_dir, &config.output_dir)?;
-    copy_theme_static_assets(config.theme_dir.as_deref(), &config.output_dir)?;
+    render::copy_site_static_assets(&config.static_dir, &config.output_dir)?;
+    render::copy_theme_static_assets(config.theme_dir.as_deref(), &config.output_dir)?;
 
     let mut islands_runtime_written = false;
     let mut file_count = 0usize;
     let scope_paths = scope_paths_set(&config.build_scope);
-    for entry in WalkDir::new(&config.content_dir).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(&config.content_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -443,11 +441,14 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         }
         match entry.path().extension().and_then(OsStr::to_str) {
             Some("md") => {
-                let raw = fs::read_to_string(entry.path())
-                    .with_context(|| format!("failed to read markdown file {}", entry.path().display()))?;
+                let raw = fs::read_to_string(entry.path()).with_context(|| {
+                    format!("failed to read markdown file {}", entry.path().display())
+                })?;
                 validation::validate_frontmatter_size(&raw, config.max_frontmatter_bytes)
-                    .with_context(|| format!("frontmatter too large in {}", entry.path().display()))?;
-                let current_hash = compute_page_build_hash(
+                    .with_context(|| {
+                        format!("frontmatter too large in {}", entry.path().display())
+                    })?;
+                let current_hash = utils::compute_page_build_hash(
                     &query_db,
                     entry.path(),
                     &raw,
@@ -463,7 +464,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     }
                 }
 
-                let rendered = render_markdown_file(
+                let rendered = render::render_markdown_file(
                     entry.path(),
                     &env,
                     &templates,
@@ -472,29 +473,30 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     config,
                     &base_path,
                 )?;
-                let target =
-                    path::output_path_for(
-                        entry.path(),
-                        &config.content_dir,
-                        &config.output_dir,
-                        rendered.slug.as_deref(),
-                        rendered.lang.as_deref(),
-                        &config.i18n,
-                    )?;
+                let target = path::output_path_for(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    rendered.slug.as_deref(),
+                    rendered.lang.as_deref(),
+                    &config.i18n,
+                )?;
                 if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create parent directory {}", parent.display())
+                    })?;
                 }
-                let (island_html, has_islands) = compile_islands(&rendered.html);
+                let (island_html, has_islands) = render::compile_islands(&rendered.html);
                 if has_islands && !islands_runtime_written {
-                    write_islands_runtime(&config.output_dir)?;
+                    render::write_islands_runtime(&config.output_dir)?;
                     islands_runtime_written = true;
                 }
                 if has_islands {
                     report.island_pages += 1;
                 }
-                fs::write(&target, island_html)
-                    .with_context(|| format!("failed to write rendered file {}", target.display()))?;
+                fs::write(&target, island_html).with_context(|| {
+                    format!("failed to write rendered file {}", target.display())
+                })?;
                 build_cache.pages.insert(
                     cache_key,
                     CachePageRecord {
@@ -504,17 +506,22 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 );
                 report.rendered_pages += 1;
             }
-            Some(ext) if is_image_extension(ext) => {
-                let hash = hashed_file_content(entry.path());
+            Some(ext) if assets::is_image_extension(ext) => {
+                let hash = utils::hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                let target = path::asset_output_path(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    None,
+                )?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         report.copied_assets += 1;
                         continue;
                     }
                 }
-                let image_record = process_image_asset(
+                let image_record = assets::process_image_asset(
                     entry.path(),
                     &config.content_dir,
                     &config.output_dir,
@@ -532,15 +539,20 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 report.processed_images += 1;
             }
             Some("scss") | Some("sass") => {
-                let hash = hashed_file_content(entry.path());
+                let hash = utils::hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, Some("css"))?;
+                let target = path::asset_output_path(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    Some("css"),
+                )?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         continue;
                     }
                 }
-                compile_sass_file(
+                assets::compile_sass_file(
                     entry.path(),
                     &config.content_dir,
                     &config.output_dir,
@@ -556,15 +568,20 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 report.compiled_sass += 1;
             }
             Some("css") => {
-                let hash = hashed_file_content(entry.path());
+                let hash = utils::hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                let target = path::asset_output_path(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    None,
+                )?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         continue;
                     }
                 }
-                process_css_asset(entry.path(), &config.content_dir, &config.output_dir)?;
+                assets::process_css_asset(entry.path(), &config.content_dir, &config.output_dir)?;
                 build_cache.assets.insert(
                     cache_key,
                     CacheAssetRecord {
@@ -575,7 +592,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 report.copied_assets += 1;
             }
             Some("js") | Some("mjs") | Some("cjs") | Some("ts") => {
-                let hash = hashed_file_content(entry.path());
+                let hash = utils::hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
                 let target = path::asset_output_path(
                     entry.path(),
@@ -592,7 +609,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                         continue;
                     }
                 }
-                process_script_asset(
+                assets::process_script_asset(
                     entry.path(),
                     &config.content_dir,
                     &config.output_dir,
@@ -609,15 +626,20 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 report.processed_scripts += 1;
             }
             _ => {
-                let hash = hashed_file_content(entry.path());
+                let hash = utils::hashed_file_content(entry.path());
                 let cache_key = entry.path().display().to_string();
-                let target = path::asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                let target = path::asset_output_path(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    None,
+                )?;
                 if let Some(record) = build_cache.assets.get(&cache_key) {
                     if record.hash == hash && PathBuf::from(&record.output).exists() {
                         continue;
                     }
                 }
-                copy_asset_file(entry.path(), &config.content_dir, &config.output_dir)?;
+                assets::copy_asset_file(entry.path(), &config.content_dir, &config.output_dir)?;
                 build_cache.assets.insert(
                     cache_key,
                     CacheAssetRecord {
@@ -631,16 +653,20 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     }
 
     if config.check_external_links {
-        let link_report = check_external_links(&config.output_dir)?;
+        let link_report = utils::check_external_links(&config.output_dir)?;
         report.checked_external_links = link_report.checked;
         report.broken_external_links = link_report.broken;
         if config.fail_on_broken_links && report.broken_external_links > 0 {
-            bail!("external link check failed: {} broken links", report.broken_external_links);
+            bail!(
+                "external link check failed: {} broken links",
+                report.broken_external_links
+            );
         }
     }
 
     if config.enable_ai_index {
-        report.ai_indexed_pages = semantic::build_semantic_index(&config.content_dir, &config.output_dir)?;
+        report.ai_indexed_pages =
+            semantic::build_semantic_index(&config.content_dir, &config.output_dir)?;
     }
 
     if !matches!(config.build_scope, BuildScope::AssetsOnly { .. }) {
@@ -650,12 +676,18 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             &base_path,
             &config.i18n,
         )?;
-        organization::generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
-        generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
+        organization::generate_content_organization_outputs(
+            &entries,
+            &config.output_dir,
+            &env,
+            &data_context,
+            &base_path,
+        )?;
+        seo::generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
     }
 
     plugin_host.shutdown()?;
-    save_build_cache(&cache_path, &build_cache)?;
+    cache::save_build_cache(&cache_path, &build_cache)?;
     if let Some(metrics) = &config.metrics {
         metrics.record_histogram(
             nanoss_metrics::metric_names::BUILD_DURATION_MS,
@@ -667,12 +699,16 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             &[("status", "ok")],
         );
     }
-    observability::emit_event("build.finish", &build_id, serde_json::json!({
-        "duration_ms": build_started.elapsed().as_millis(),
-        "rendered_pages": report.rendered_pages,
-        "processed_images": report.processed_images,
-        "copied_assets": report.copied_assets,
-    }));
+    observability::emit_event(
+        "build.finish",
+        &build_id,
+        serde_json::json!({
+            "duration_ms": build_started.elapsed().as_millis(),
+            "rendered_pages": report.rendered_pages,
+            "processed_images": report.processed_images,
+            "copied_assets": report.copied_assets,
+        }),
+    );
 
     Ok(report)
 }
@@ -683,13 +719,6 @@ fn scope_paths_set(scope: &BuildScope) -> HashSet<String> {
 
 fn scope_includes_entry(scope: &BuildScope, scope_paths: &HashSet<String>, path: &Path) -> bool {
     build::scope_includes_entry(scope, scope_paths, path)
-}
-
-fn log_build_event(stage: &str, payload: serde_json::Value) {
-    let mut obj = serde_json::Map::new();
-    obj.insert("stage".to_string(), serde_json::Value::String(stage.to_string()));
-    obj.insert("payload".to_string(), payload);
-    println!("{}", serde_json::Value::Object(obj));
 }
 
 struct RenderedPage {
@@ -705,1444 +734,11 @@ struct TocItem {
     text: String,
 }
 
-fn render_markdown_file(
-    path: &Path,
-    env: &Environment<'_>,
-    templates: &HashMap<String, String>,
-    plugin_host: &mut PluginHost,
-    data_context: &serde_json::Value,
-    config: &BuildConfig,
-    base_path: &str,
-) -> Result<RenderedPage> {
-    render::render_markdown_file(path, env, templates, plugin_host, data_context, config, base_path)
-}
-
-fn load_templates(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<HashMap<String, String>> {
-    let mut templates = HashMap::new();
-    templates.insert("page.html".to_string(), DEFAULT_PAGE_TEMPLATE.to_string());
-
-    if let Some(theme) = theme_dir {
-        let root = theme.join("templates");
-        if root.exists() {
-            collect_templates_from_dir(&root, &mut templates)?;
-        }
-    }
-    if let Some(site) = template_dir {
-        if site.exists() {
-            collect_templates_from_dir(site, &mut templates)?;
-        }
-    }
-    Ok(templates)
-}
-
-fn collect_templates_from_dir(root: &Path, templates: &mut HashMap<String, String>) -> Result<()> {
-    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.path().extension().and_then(OsStr::to_str) != Some("html") {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .with_context(|| format!("failed to relativize template {}", entry.path().display()))?;
-        let key = rel.to_string_lossy().replace('\\', "/");
-        let source = fs::read_to_string(entry.path())
-            .with_context(|| format!("failed to read template {}", entry.path().display()))?;
-        templates.insert(key, source);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn load_page_template(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<String> {
-    let templates = load_templates(template_dir, theme_dir)?;
-    Ok(templates
-        .get("page.html")
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_PAGE_TEMPLATE.to_string()))
-}
-
-fn copy_theme_static_assets(theme_dir: Option<&Path>, output_dir: &Path) -> Result<()> {
-    let Some(theme) = theme_dir else {
-        return Ok(());
-    };
-    let static_root = theme.join("static");
-    if !static_root.exists() {
-        return Ok(());
-    }
-
-    for entry in WalkDir::new(&static_root).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(&static_root)
-            .with_context(|| format!("failed to relativize theme static {}", entry.path().display()))?;
-        let target = output_dir.join(rel);
-        if target.exists() {
-            // Site output takes precedence over theme static assets.
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create theme static parent {}", parent.display()))?;
-        }
-        fs::copy(entry.path(), &target)
-            .with_context(|| format!("failed to copy theme static {} -> {}", entry.path().display(), target.display()))?;
-    }
-    Ok(())
-}
-
-fn copy_site_static_assets(static_dir: &Path, output_dir: &Path) -> Result<()> {
-    if !static_dir.exists() {
-        return Ok(());
-    }
-
-    for entry in WalkDir::new(static_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(static_dir)
-            .with_context(|| format!("failed to relativize static asset {}", entry.path().display()))?;
-        let target = output_dir.join(rel);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create static asset parent {}", parent.display()))?;
-        }
-        fs::copy(entry.path(), &target)
-            .with_context(|| format!("failed to copy static asset {} -> {}", entry.path().display(), target.display()))?;
-    }
-
-    Ok(())
-}
-
-fn parse_frontmatter(input: &str) -> Result<(FrontMatter, &str)> {
-    if !input.starts_with("---\n") {
-        return Ok((FrontMatter::default(), input));
-    }
-
-    let remainder = &input[4..];
-    if let Some(end) = remainder.find("\n---\n") {
-        let yaml = &remainder[..end];
-        let body = &remainder[end + 5..];
-        let frontmatter: FrontMatter = serde_yaml::from_str(yaml).context("invalid YAML frontmatter")?;
-        return Ok((frontmatter, body));
-    }
-
-    Ok((FrontMatter::default(), input))
-}
-
-fn markdown_to_html(markdown: &str) -> (String, Vec<TocItem>) {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_FOOTNOTES);
-    options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
-    let parser = Parser::new_ext(markdown, options);
-
-    let mut events = Vec::new();
-    let mut toc = Vec::new();
-    let mut heading: Option<(HeadingLevel, Vec<Event<'_>>)> = None;
-    let mut code_block: Option<CodeBlockState> = None;
-
-    for event in parser {
-        if let Some(block) = code_block.as_mut() {
-            match event {
-                Event::Text(text) | Event::Code(text) => block.content.push_str(&text),
-                Event::SoftBreak | Event::HardBreak => block.content.push('\n'),
-                Event::End(TagEnd::CodeBlock) => {
-                    if let Some(finished) = code_block.take() {
-                        let highlighted = highlight_code_block(&finished.language, &finished.content);
-                        events.push(Event::Html(CowStr::Boxed(highlighted.into_boxed_str())));
-                    }
-                }
-                _ => {}
-            }
-            continue;
-        }
-
-        match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                heading = Some((level, Vec::new()));
-            }
-            Event::Start(Tag::CodeBlock(kind)) => {
-                code_block = Some(CodeBlockState {
-                    language: language_from_code_block_kind(kind),
-                    content: String::new(),
-                });
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                if let Some((level, heading_events)) = heading.take() {
-                    let text = heading_text(&heading_events);
-                    let id = slugify(&text);
-                    events.push(Event::Start(Tag::Heading {
-                        level,
-                        id: Some(id.clone().into()),
-                        classes: Vec::new(),
-                        attrs: Vec::new(),
-                    }));
-                    events.extend(heading_events);
-                    events.push(Event::End(TagEnd::Heading(level)));
-
-                    if !text.is_empty() {
-                        toc.push(TocItem {
-                            level: heading_level_to_u8(level),
-                            id,
-                            text,
-                        });
-                    }
-                }
-            }
-            other => {
-                if let Some((_, heading_events)) = heading.as_mut() {
-                    heading_events.push(other);
-                } else {
-                    events.push(other);
-                }
-            }
-        }
-    }
-
-    let mut out = String::new();
-    html::push_html(&mut out, events.into_iter());
-    (out, toc)
-}
-
-fn expand_component_shortcodes(markdown: &str) -> String {
-    static COMPONENT_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"\{\{<\s*([A-Za-z0-9_-]+)([^>]*)>\}\}"#).expect("valid component shortcode regex")
-    });
-    static ATTR_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"([A-Za-z0-9_-]+)\s*=\s*"([^"]*)""#).expect("valid shortcode attr regex")
-    });
-    COMPONENT_RE
-        .replace_all(markdown, |caps: &regex::Captures<'_>| {
-            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("component");
-            let attrs = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let mut values = BTreeMap::<String, String>::new();
-            for attr in ATTR_RE.captures_iter(attrs) {
-                let key = attr.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
-                let value = attr.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
-                if !key.is_empty() {
-                    values.insert(key, value);
-                }
-            }
-            let mode = values.get("mode").map(String::as_str).unwrap_or("static");
-            if mode == "island" {
-                let mut props = serde_json::Map::new();
-                for (k, v) in values {
-                    if k != "mode" {
-                        props.insert(k, serde_json::Value::String(v));
-                    }
-                }
-                let props_json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
-                return format!(
-                    "<island name=\"component-{}\" props='{}'></island>",
-                    sanitize_language_token(name),
-                    escape_html(&props_json)
-                );
-            }
-            let text = values
-                .get("text")
-                .cloned()
-                .unwrap_or_else(|| format!("component: {}", name));
-            format!(
-                "<div class=\"nanoss-component nanoss-component-{}\">{}</div>",
-                sanitize_language_token(name),
-                escape_html(&text)
-            )
-        })
-        .into_owned()
-}
-
-fn resolve_template_name(path: &Path, frontmatter: &FrontMatter, templates: &HashMap<String, String>) -> String {
-    if let Some(template) = frontmatter.template.as_deref() {
-        if templates.contains_key(template) {
-            return template.to_string();
-        }
-    }
-    if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(OsStr::to_str) {
-        let scoped = format!("{parent}.html");
-        if templates.contains_key(&scoped) {
-            return scoped;
-        }
-    }
-    "page.html".to_string()
-}
-
-fn build_page_image_helpers(
-    page_path: &Path,
-    markdown_raw: &str,
-    config: &BuildConfig,
-    base_path: &str,
-) -> Result<serde_json::Value> {
-    let deps = discover_page_asset_dependencies(page_path, markdown_raw);
-    let mut items = Vec::new();
-    for dep in deps {
-        if !dep.starts_with(&config.content_dir) {
-            continue;
-        }
-        let rel = dep
-            .strip_prefix(&config.content_dir)
-            .with_context(|| format!("failed to relativize image dependency {}", dep.display()))?;
-        let rel_url = format!("/{}", rel.to_string_lossy().replace('\\', "/"));
-        let mut variants = Vec::new();
-        for width in &config.images.widths {
-            variants.push(serde_json::json!({
-                "width": width,
-                "webp": with_base_path(&format!("{}-w{}.webp", rel_url.trim_end_matches(".png").trim_end_matches(".jpg").trim_end_matches(".jpeg"), width), base_path),
-                "avif": with_base_path(&format!("{}-w{}.avif", rel_url.trim_end_matches(".png").trim_end_matches(".jpg").trim_end_matches(".jpeg"), width), base_path)
-            }));
-        }
-        items.push(serde_json::json!({
-            "source": with_base_path(&rel_url, base_path),
-            "variants": variants
-        }));
-    }
-    Ok(serde_json::json!({ "list": items }))
-}
-
-fn build_i18n_alternates(
-    path: &Path,
-    frontmatter: &FrontMatter,
-    config: &BuildConfig,
-    base_path: &str,
-) -> Result<Vec<serde_json::Value>> {
-    if config.i18n.locales.is_empty() {
-        return Ok(Vec::new());
-    }
-    let slug = frontmatter
-        .slug
-        .clone()
-        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
-        .unwrap_or_else(|| "index".to_string());
-    let mut alternates = Vec::new();
-    for locale in &config.i18n.locales {
-        let locale_prefix = locale_prefix_for_output(Some(locale), &config.i18n)?;
-        let route = if slug == "index" {
-            match locale_prefix {
-                Some(prefix) => format!("/{prefix}/"),
-                None => "/".to_string(),
-            }
-        } else {
-            match locale_prefix {
-                Some(prefix) => format!("/{prefix}/{slug}/"),
-                None => format!("/{slug}/"),
-            }
-        };
-        alternates.push(serde_json::json!({
-            "locale": locale,
-            "url": with_base_path(&route, base_path),
-        }));
-    }
-    Ok(alternates)
-}
-
-fn output_path_for(
-    source: &Path,
-    content_root: &Path,
-    output_root: &Path,
-    slug: Option<&str>,
-    lang: Option<&str>,
-    i18n: &I18nConfig,
-) -> Result<PathBuf> {
-    let locale_segment = locale_prefix_for_output(lang, i18n)?;
-    if let Some(slug) = slug {
-        validate_route_segment(slug, "slug")?;
-        let mut base = output_root.to_path_buf();
-        if let Some(locale) = locale_segment.as_deref() {
-            base = base.join(locale);
-        }
-        let candidate = if slug == "index" {
-            base.join("index.html")
-        } else {
-            base.join(slug).join("index.html")
-        };
-        ensure_inside_output(output_root, &candidate)?;
-        return Ok(candidate);
-    }
-
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let mut target = output_root.to_path_buf();
-    if let Some(locale) = locale_segment.as_deref() {
-        target = target.join(locale);
-    }
-    target = target.join(rel);
-    target.set_extension("html");
-    ensure_inside_output(output_root, &target)?;
-    Ok(target)
-}
-
-fn locale_prefix_for_output(lang: Option<&str>, i18n: &I18nConfig) -> Result<Option<String>> {
-    let Some(locale) = lang.or(i18n.default_locale.as_deref()) else {
-        return Ok(None);
-    };
-    validate_route_segment(locale, "locale")?;
-    if !i18n.locales.is_empty() && !i18n.locales.iter().any(|candidate| candidate == locale) {
-        bail!("locale '{}' is not in configured locales", locale);
-    }
-    if i18n.default_locale.as_deref() == Some(locale) && !i18n.prefix_default_locale {
-        return Ok(None);
-    }
-    Ok(Some(locale.to_string()))
-}
-
-fn compile_sass_file(source: &Path, content_root: &Path, output_root: &Path, _timeout_secs: u64) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let mut target = output_root.join(rel);
-    target.set_extension("css");
-
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-
-    let css = grass::from_path(source, &grass::Options::default())
-        .with_context(|| format!("failed to compile Sass file {}", source.display()))?;
-    let optimized = optimize_css(source, &css)?;
-    fs::write(&target, optimized).with_context(|| format!("failed to write Sass output {}", target.display()))?;
-    Ok(())
-}
-
-fn process_css_asset(source: &Path, content_root: &Path, output_root: &Path) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let target = output_root.join(rel);
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-    let raw_css = fs::read_to_string(source)
-        .with_context(|| format!("failed to read CSS asset {}", source.display()))?;
-    let optimized = optimize_css(source, &raw_css)?;
-    fs::write(&target, optimized)
-        .with_context(|| format!("failed to write CSS asset {}", target.display()))?;
-    Ok(())
-}
-
-fn copy_asset_file(source: &Path, content_root: &Path, output_root: &Path) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let target = output_root.join(rel);
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-    fs::copy(source, &target)
-        .with_context(|| format!("failed to copy asset {} -> {}", source.display(), target.display()))?;
-    Ok(())
-}
-
-fn process_image_asset(
-    source: &Path,
-    content_root: &Path,
-    output_root: &Path,
-    image_config: &ImageBuildConfig,
-) -> Result<CacheImageRecord> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let target = output_root.join(rel);
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-    fs::copy(source, &target)
-        .with_context(|| format!("failed to copy image {} -> {}", source.display(), target.display()))?;
-
-    let mut record = CacheImageRecord {
-        hash: hashed_file_content(source),
-        output: target.display().to_string(),
-        width: None,
-        height: None,
-        variants: Vec::new(),
-    };
-    if !image_config.enabled {
-        return Ok(record);
-    }
-
-    let image = match image::open(source) {
-        Ok(image) => image,
-        Err(_) => return Ok(record),
-    };
-    let (width, height) = image.dimensions();
-    record.width = Some(width);
-    record.height = Some(height);
-
-    let mut formats = vec!["original".to_string()];
-    if image_config.generate_webp {
-        formats.push("webp".to_string());
-    }
-    if image_config.generate_avif {
-        formats.push("avif".to_string());
-    }
-    let mut widths = image_config.widths.clone();
-    widths.sort_unstable();
-    widths.dedup();
-
-    for format in formats {
-        for width_hint in widths.iter().copied().chain(std::iter::once(width)) {
-            if width_hint == 0 || width_hint > width {
-                continue;
-            }
-            if format == "original" && width_hint == width {
-                continue;
-            }
-            let variant = if width_hint == width {
-                image.clone()
-            } else {
-                let ratio = width_hint as f32 / width as f32;
-                let height_hint = ((height as f32) * ratio).round().max(1.0) as u32;
-                image.resize_exact(width_hint, height_hint, FilterType::Lanczos3)
-            };
-            if let Some(variant_output) = write_image_variant(&target, &variant, &format, width_hint)? {
-                record.variants.push(ImageVariantRecord {
-                    format: format.clone(),
-                    width: Some(width_hint),
-                    output: variant_output.display().to_string(),
-                });
-            }
-        }
-    }
-    Ok(record)
-}
-
-fn write_image_variant(target: &Path, image: &image::DynamicImage, format: &str, width: u32) -> Result<Option<PathBuf>> {
-    let stem = target.file_stem().and_then(OsStr::to_str).unwrap_or("image");
-    let suffix = if format == "original" {
-        target
-            .extension()
-            .and_then(OsStr::to_str)
-            .map(|ext| ext.to_string())
-            .unwrap_or_else(|| "img".to_string())
-    } else {
-        format.to_string()
-    };
-    let file_name = format!("{stem}-w{width}.{suffix}");
-    let output = target.with_file_name(file_name);
-    let mut bytes = Vec::new();
-    match format {
-        "webp" => {
-            let rgba = image.to_rgba8();
-            WebPEncoder::new_lossless(&mut bytes)
-                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
-                .context("failed to encode webp variant")?;
-        }
-        "avif" => {
-            let rgba = image.to_rgba8();
-            AvifEncoder::new(&mut bytes)
-                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
-                .context("failed to encode avif variant")?;
-        }
-        "original" => {
-            image
-                .save(&output)
-                .with_context(|| format!("failed to write resized variant {}", output.display()))?;
-            return Ok(Some(output));
-        }
-        _ => return Ok(None),
-    }
-    fs::write(&output, bytes).with_context(|| format!("failed to write image variant {}", output.display()))?;
-    Ok(Some(output))
-}
-
-fn is_image_extension(ext: &str) -> bool {
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "tiff"
-    )
-}
-
-fn process_script_asset(
-    source: &Path,
-    content_root: &Path,
-    output_root: &Path,
-    backend: JsBackend,
-    timeout_secs: u64,
-) -> Result<()> {
-    assets::process_script_asset(source, content_root, output_root, backend, timeout_secs)
-}
-
-fn run_tailwind(config: &TailwindConfig, content_dir: &Path, timeout_secs: u64) -> Result<()> {
-    assets::run_tailwind(config, content_dir, timeout_secs)
-}
-
-fn heading_text(events: &[Event<'_>]) -> String {
-    let mut text = String::new();
-    for event in events {
-        match event {
-            Event::Text(t) | Event::Code(t) => text.push_str(t),
-            _ => {}
-        }
-    }
-    text.trim().to_string()
-}
-
-fn heading_level_to_u8(level: HeadingLevel) -> u8 {
-    match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
-    }
-}
-
-fn slugify(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut last_dash = false;
-    for ch in value.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-fn build_toc_html(items: &[TocItem]) -> String {
-    if items.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::from("<ul>");
-    for item in items {
-        out.push_str(&format!(
-            "<li class=\"toc-level-{}\"><a href=\"#{}\">{}</a></li>",
-            item.level, item.id, item.text
-        ));
-    }
-    out.push_str("</ul>");
-    out
-}
-
-struct CodeBlockState {
-    language: String,
-    content: String,
-}
-
-fn language_from_code_block_kind(kind: CodeBlockKind<'_>) -> String {
-    match kind {
-        CodeBlockKind::Indented => String::new(),
-        CodeBlockKind::Fenced(lang) => lang.to_string(),
-    }
-}
-
-fn highlight_code_block(language: &str, code: &str) -> String {
-    let syntax = if language.is_empty() {
-        SYNTAX_SET.find_syntax_plain_text()
-    } else {
-        SYNTAX_SET
-            .find_syntax_by_token(language)
-            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text())
-    };
-
-    if let Some(theme) = THEME_SET
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| THEME_SET.themes.values().next())
-    {
-        if let Ok(html) = highlighted_html_for_string(code, &SYNTAX_SET, syntax, theme) {
-            return html;
-        }
-    }
-
-    let safe_lang = sanitize_language_token(language);
-    let safe_code = escape_html(code);
-    if safe_lang.is_empty() {
-        format!("<pre><code>{safe_code}</code></pre>")
-    } else {
-        format!("<pre><code class=\"language-{safe_lang}\">{safe_code}</code></pre>")
-    }
-}
-
-fn sanitize_language_token(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-        .collect()
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn compile_islands(html: &str) -> (String, bool) {
-    let mut had_islands = false;
-    let replaced = ISLAND_TAG_RE
-        .replace_all(html, |caps: &regex::Captures<'_>| {
-            had_islands = true;
-            let name = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
-            let props = caps.get(2).map(|m| m.as_str()).unwrap_or("{}");
-            format!(
-                "<div data-island=\"{}\" data-props='{}'></div>",
-                escape_html(name),
-                escape_html(props)
-            )
-        })
-        .into_owned();
-    if !had_islands {
-        return (replaced, false);
-    }
-    (inject_islands_runtime_script(&replaced), true)
-}
-
-fn inject_islands_runtime_script(html: &str) -> String {
-    let script = "<script type=\"module\" src=\"/_nanoss/islands-runtime.js\"></script>";
-    if let Some(idx) = html.rfind("</body>") {
-        let mut out = String::with_capacity(html.len() + script.len() + 1);
-        out.push_str(&html[..idx]);
-        out.push_str(script);
-        out.push('\n');
-        out.push_str(&html[idx..]);
-        return out;
-    }
-    if let Some(idx) = html.rfind("</html>") {
-        let mut out = String::with_capacity(html.len() + script.len() + 1);
-        out.push_str(&html[..idx]);
-        out.push_str(script);
-        out.push('\n');
-        out.push_str(&html[idx..]);
-        return out;
-    }
-    format!("{}\n{}", html, script)
-}
-
-fn write_islands_runtime(output_root: &Path) -> Result<()> {
-    let runtime_path = output_root.join("_nanoss").join("islands-runtime.js");
-    if let Some(parent) = runtime_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create islands runtime parent {}", parent.display()))?;
-    }
-        let runtime = r#"const registry = new Map();
-
-function parseProps(node) {
-    const raw = node.getAttribute('data-props') || '{}';
-    try {
-        return JSON.parse(raw);
-    } catch {
-        return {};
-    }
-}
-
-function mountNode(node) {
-    const name = node.getAttribute('data-island');
-    if (!name) return;
-
-    const handler = registry.get(name);
-    if (!handler) {
-        node.setAttribute('data-island-pending', 'true');
-        if (!node.textContent || !node.textContent.trim()) {
-            node.textContent = `[island:${name}] waiting for register()`;
-        }
-        return;
-    }
-
-    const props = parseProps(node);
-    handler(node, props);
-    node.removeAttribute('data-island-pending');
-    node.setAttribute('data-island-hydrated', 'true');
-}
-
-function hydrate(targetName) {
-    const nodes = document.querySelectorAll('[data-island]');
-    for (const node of nodes) {
-        const current = node.getAttribute('data-island');
-        if (!targetName || current === targetName) {
-            mountNode(node);
-        }
-    }
-}
-
-const api = {
-    register(name, handler) {
-        if (typeof name !== 'string' || !name) {
-            throw new Error('NanossIslands.register(name, handler): name must be non-empty string');
-        }
-        if (typeof handler !== 'function') {
-            throw new Error('NanossIslands.register(name, handler): handler must be function');
-        }
-        registry.set(name, handler);
-        hydrate(name);
-    },
-    hydrate,
-};
-
-if (!window.NanossIslands) {
-    window.NanossIslands = api;
-} else {
-    window.NanossIslands.register = api.register;
-    window.NanossIslands.hydrate = api.hydrate;
-}
-
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => hydrate());
-} else {
-    hydrate();
-}
-"#;
-    fs::write(&runtime_path, runtime)
-        .with_context(|| format!("failed to write islands runtime {}", runtime_path.display()))?;
-    Ok(())
-}
-
-fn optimize_css<'a>(source: &Path, css: &'a str) -> Result<String> {
-    let options: ParserOptions<'a, 'a> = ParserOptions {
-        filename: source.display().to_string(),
-        css_modules: None,
-        source_index: 0,
-        error_recovery: false,
-        warnings: None,
-        flags: ParserFlags::empty(),
-    };
-    let output = StyleSheet::parse(css, options)
-        .map_err(|err| anyhow!("failed to parse CSS {}: {err}", source.display()))?
-        .to_css(PrinterOptions {
-            minify: true,
-            ..PrinterOptions::default()
-        })
-        .with_context(|| format!("failed to process CSS {}", source.display()))?;
-    Ok(output.code)
-}
-
 #[derive(Default)]
 struct LinkCheckReport {
     checked: usize,
     broken: usize,
 }
 
-fn check_external_links(output_root: &Path) -> Result<LinkCheckReport> {
-    let http = ports::StdHttpPort;
-
-    let mut links = HashSet::new();
-    for entry in WalkDir::new(output_root).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if entry.path().extension().and_then(OsStr::to_str) != Some("html") {
-            continue;
-        }
-        let html = fs::read_to_string(entry.path())
-            .with_context(|| format!("failed to read HTML file {}", entry.path().display()))?;
-        for cap in HREF_HTTP_RE.captures_iter(&html) {
-            if let Some(m) = cap.get(1) {
-                links.insert(m.as_str().to_string());
-            }
-        }
-    }
-
-    let mut report = LinkCheckReport::default();
-    for link in links {
-        report.checked += 1;
-        let status = check_url_status(&http, &link);
-        if status.is_none() || status.unwrap() >= 400 {
-            report.broken += 1;
-            eprintln!("broken external link: {link}");
-        }
-    }
-
-    Ok(report)
-}
-
-fn check_url_status(http: &dyn ports::HttpPort, url: &str) -> Option<u16> {
-    let head_status = request_status(http, Method::HEAD, url);
-    match head_status {
-        Some(code) if code == StatusCode::METHOD_NOT_ALLOWED.as_u16() => {
-            request_status(http, Method::GET, url)
-        }
-        Some(code) => Some(code),
-        None => request_status(http, Method::GET, url),
-    }
-}
-
-fn load_build_cache(path: &Path) -> Result<BuildCache> {
-    cache::load_build_cache(path)
-}
-
-fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
-    cache::save_build_cache(path, cache)
-}
-
-fn compute_template_dependency_hash(
-    db: &QueryDb,
-    template_dir: Option<&Path>,
-    theme_dir: Option<&Path>,
-) -> Result<String> {
-    let mut hashes = Vec::new();
-
-    if let Some(templates) = template_dir {
-        let files: Vec<PathBuf> = WalkDir::new(templates)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-            .map(|e| e.path().to_path_buf())
-            .collect();
-        hashes.extend(files
-            .par_iter()
-            .map(|path| {
-                let raw = read_file_for_query(path);
-                let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
-                format!("site:{}:{}", path.display(), digest)
-            })
-            .collect::<Vec<_>>());
-    }
-
-    if let Some(theme) = theme_dir {
-        let theme_templates = theme.join("templates");
-        if theme_templates.exists() {
-            let files: Vec<PathBuf> = WalkDir::new(&theme_templates)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.path().to_path_buf())
-                .collect();
-            hashes.extend(files
-                .par_iter()
-                .map(|path| {
-                    let raw = read_file_for_query(path);
-                    let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
-                    format!("theme:{}:{}", path.display(), digest)
-                })
-                .collect::<Vec<_>>());
-        }
-    }
-
-    hashes.sort_unstable();
-    let mut merged = String::from("template-deps:v1");
-    for hash in hashes {
-        merged = combine_fingerprints(db, merged, hash);
-    }
-    Ok(merged)
-}
-
-fn compute_page_build_hash(
-    db: &QueryDb,
-    page_path: &Path,
-    markdown_raw: &str,
-    template_hash: &str,
-    content_dir: &Path,
-) -> Result<String> {
-    let source = SourceFile::new(db, page_path.to_path_buf(), markdown_raw.to_string());
-    let page_hash = content_hash(db, source);
-    let asset_hash = compute_page_asset_dependency_hash(db, page_path, markdown_raw, content_dir)?;
-    let with_assets = combine_fingerprints(db, page_hash, asset_hash);
-    Ok(combine_fingerprints(
-        db,
-        with_assets,
-        template_hash.to_string(),
-    ))
-}
-
-fn compute_page_asset_dependency_hash(
-    db: &QueryDb,
-    page_path: &Path,
-    markdown_raw: &str,
-    content_dir: &Path,
-) -> Result<String> {
-    let mut deps = discover_page_asset_dependencies(page_path, markdown_raw);
-    deps.retain(|path| path.starts_with(content_dir));
-
-    let mut hashes = Vec::new();
-    for dep in deps {
-        if dep.is_file() {
-            let raw = read_file_for_query(&dep);
-            let source = SourceFile::new(db, dep.clone(), raw);
-            let fingerprint = combine_fingerprints(
-                db,
-                dep.display().to_string(),
-                content_hash(db, source),
-            );
-            hashes.push(fingerprint);
-        }
-    }
-
-    hashes.sort_unstable();
-    let mut merged = String::from("page-assets:v1");
-    for hash in hashes {
-        merged = combine_fingerprints(db, merged, hash);
-    }
-    Ok(merged)
-}
-
-fn discover_page_asset_dependencies(page_path: &Path, markdown_raw: &str) -> Vec<PathBuf> {
-    let base_dir = page_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut deps = HashSet::new();
-    for raw in extract_asset_like_refs(markdown_raw) {
-        if is_external_ref(&raw) {
-            continue;
-        }
-        if let Some(normalized) = normalize_ref(&raw) {
-            deps.insert(base_dir.join(normalized));
-        }
-    }
-    deps.into_iter().collect()
-}
-
-fn extract_asset_like_refs(markdown_raw: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-    for captures in MD_LINK_RE.captures_iter(markdown_raw) {
-        if let Some(m) = captures.get(1) {
-            refs.push(m.as_str().to_string());
-        }
-    }
-    for captures in HTML_ASSET_ATTR_RE.captures_iter(markdown_raw) {
-        if let Some(m) = captures.get(1) {
-            refs.push(m.as_str().to_string());
-        }
-    }
-    refs
-}
-
-fn is_external_ref(value: &str) -> bool {
-    value.starts_with("http://")
-        || value.starts_with("https://")
-        || value.starts_with("mailto:")
-        || value.starts_with('#')
-        || value.starts_with("//")
-        || value.starts_with("data:")
-        || value.starts_with('/')
-}
-
-fn normalize_ref(value: &str) -> Option<&str> {
-    let no_query = value.split('?').next().unwrap_or(value);
-    let no_fragment = no_query.split('#').next().unwrap_or(no_query);
-    if no_fragment.is_empty() {
-        None
-    } else {
-        Some(no_fragment)
-    }
-}
-
-fn read_file_for_query(path: &Path) -> String {
-    match fs::read(path) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(err) => blake3::hash(&err.into_bytes()).to_hex().to_string(),
-        },
-        Err(_) => String::new(),
-    }
-}
-
-fn build_semantic_index(content_dir: &Path, output_dir: &Path) -> Result<usize> {
-    semantic::build_semantic_index(content_dir, output_dir)
-}
-
-fn embed_text_lightweight(text: &str, dims: usize) -> Vec<f32> {
-    semantic::embed_text_lightweight(text, dims)
-}
-
-fn request_status(http: &dyn ports::HttpPort, method: Method, url: &str) -> Option<u16> {
-    http.request_status(method, url, 10, "nanoss-link-checker/0.1.0")
-}
-
-fn load_data_context(
-    content_dir: &Path,
-    output_dir: &Path,
-    remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
-) -> Result<serde_json::Value> {
-    data::load_data_context(content_dir, output_dir, remote_sources)
-}
-
-fn collect_content_entries(
-    content_dir: &Path,
-    output_dir: &Path,
-    base_path: &str,
-    i18n: &I18nConfig,
-) -> Result<Vec<ContentEntry>> {
-    organization::collect_content_entries(content_dir, output_dir, base_path, i18n)
-}
-
-fn render_organization_page(
-    env: &Environment<'_>,
-    data_context: &serde_json::Value,
-    base_path: &str,
-    title: &str,
-    body_html: &str,
-) -> Result<String> {
-    organization::render_organization_page(env, data_context, base_path, title, body_html)
-}
-
-fn generate_content_organization_outputs(
-    entries: &[ContentEntry],
-    output_dir: &Path,
-    env: &Environment<'_>,
-    data_context: &serde_json::Value,
-    base_path: &str,
-) -> Result<()> {
-    organization::generate_content_organization_outputs(entries, output_dir, env, data_context, base_path)
-}
-
-fn write_taxonomy_pages(
-    root: PathBuf,
-    heading: &str,
-    groups: &BTreeMap<String, Vec<&ContentEntry>>,
-    env: &Environment<'_>,
-    data_context: &serde_json::Value,
-    base_path: &str,
-) -> Result<()> {
-    organization::write_taxonomy_pages(root, heading, groups, env, data_context, base_path)
-}
-
-fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path, site_domain: Option<&str>) -> Result<()> {
-    seo::generate_sitemap_and_feed(entries, output_dir, site_domain)
-}
-
-fn validate_build_config(config: &BuildConfig) -> Result<()> {
-    validation::validate_build_config(config)
-}
-
-fn normalize_base_path(input: &str) -> String {
-    path::normalize_base_path(input)
-}
-
-fn normalize_site_domain(input: Option<&str>) -> Result<Option<String>> {
-    path::normalize_site_domain(input)
-}
-
-fn base_href_prefix(base_path: &str) -> &str {
-    path::base_href_prefix(base_path)
-}
-
-fn with_base_path(url: &str, base_path: &str) -> String {
-    path::with_base_path(url, base_path)
-}
-
-fn to_site_url(path_without_root: &str, base_path: &str) -> String {
-    path::to_site_url(path_without_root, base_path)
-}
-
-fn canonicalize_site_url(path: &str, site_domain: Option<&str>) -> String {
-    path::canonicalize_site_url(path, site_domain)
-}
-
-fn rewrite_html_absolute_links_with_base_path(html: &str, base_path: &str) -> String {
-    path::rewrite_html_absolute_links_with_base_path(html, base_path)
-}
-
-fn validate_frontmatter_size(raw: &str, limit: usize) -> Result<()> {
-    validation::validate_frontmatter_size(raw, limit)
-}
-
-fn hashed_file_content(path: &Path) -> String {
-    match fs::read(path) {
-        Ok(bytes) => blake3::hash(&bytes).to_hex().to_string(),
-        Err(_) => String::new(),
-    }
-}
-
-fn asset_output_path(source: &Path, content_root: &Path, output_root: &Path, force_ext: Option<&str>) -> Result<PathBuf> {
-    path::asset_output_path(source, content_root, output_root, force_ext)
-}
-
-fn validate_route_segment(value: &str, field: &str) -> Result<()> {
-    validation::validate_route_segment(value, field)
-}
-
-fn ensure_inside_output(output_root: &Path, candidate: &Path) -> Result<()> {
-    validation::ensure_inside_output(output_root, candidate)
-}
-
-fn ensure_binary_name_safe(binary: &str) -> Result<()> {
-    validation::ensure_binary_name_safe(binary)
-}
-
-fn wait_child_with_timeout(child: &mut Child, timeout_secs: u64) -> Result<ExitStatus> {
-    let timeout = Duration::from_secs(timeout_secs.max(1));
-    let start = std::time::Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().context("failed to poll child process")? {
-            return Ok(status);
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            bail!("child process timed out after {}s", timeout_secs.max(1));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn page_template_prefers_site_over_theme() -> Result<()> {
-        let site = tempdir().context("failed to create site dir")?;
-        let theme = tempdir().context("failed to create theme dir")?;
-        fs::write(site.path().join("page.html"), "site").context("failed to write site template")?;
-        fs::create_dir_all(theme.path().join("templates")).context("failed to make theme templates")?;
-        fs::write(theme.path().join("templates/page.html"), "theme")
-            .context("failed to write theme template")?;
-        let chosen = load_page_template(Some(site.path()), Some(theme.path()))?;
-        assert_eq!(chosen, "site");
-        Ok(())
-    }
-
-    #[test]
-    fn copy_theme_static_skips_existing_output() -> Result<()> {
-        let theme = tempdir().context("failed to create theme dir")?;
-        let out = tempdir().context("failed to create output dir")?;
-        fs::create_dir_all(theme.path().join("static/assets")).context("failed to make static dir")?;
-        fs::write(theme.path().join("static/assets/logo.txt"), "theme")
-            .context("failed to write theme asset")?;
-        fs::create_dir_all(out.path().join("assets")).context("failed to make out asset dir")?;
-        fs::write(out.path().join("assets/logo.txt"), "site").context("failed to write site asset")?;
-
-        copy_theme_static_assets(Some(theme.path()), out.path())?;
-        let final_asset = fs::read_to_string(out.path().join("assets/logo.txt"))
-            .context("failed to read merged asset")?;
-        assert_eq!(final_asset, "site");
-        Ok(())
-    }
-
-    #[test]
-    fn copy_site_static_assets_overwrites_existing_output() -> Result<()> {
-        let static_dir = tempdir().context("failed to create static dir")?;
-        let out = tempdir().context("failed to create output dir")?;
-        fs::create_dir_all(static_dir.path().join("assets")).context("failed to make static assets dir")?;
-        fs::create_dir_all(out.path().join("assets")).context("failed to make output assets dir")?;
-        fs::write(static_dir.path().join("assets/logo.txt"), "site").context("failed to write static asset")?;
-        fs::write(out.path().join("assets/logo.txt"), "old").context("failed to write existing output asset")?;
-
-        copy_site_static_assets(static_dir.path(), out.path())?;
-        let final_asset = fs::read_to_string(out.path().join("assets/logo.txt"))
-            .context("failed to read merged site static asset")?;
-        assert_eq!(final_asset, "site");
-        Ok(())
-    }
-
-    #[test]
-    fn template_hash_includes_theme_templates() -> Result<()> {
-        let query_db = QueryDb::default();
-        let site_templates = tempdir().context("failed to create site templates dir")?;
-        let theme = tempdir().context("failed to create theme dir")?;
-        fs::create_dir_all(theme.path().join("templates")).context("failed to create theme templates")?;
-        fs::write(site_templates.path().join("page.html"), "site-v1").context("failed to write site template")?;
-        fs::write(theme.path().join("templates/page.html"), "theme-v1").context("failed to write theme template")?;
-
-        let before = compute_template_dependency_hash(&query_db, Some(site_templates.path()), Some(theme.path()))?;
-        fs::write(theme.path().join("templates/page.html"), "theme-v2").context("failed to update theme template")?;
-        let after = compute_template_dependency_hash(&query_db, Some(site_templates.path()), Some(theme.path()))?;
-
-        assert_ne!(before, after);
-        Ok(())
-    }
-
-    #[test]
-    fn organization_pages_use_theme_template() -> Result<()> {
-        let root = tempdir().context("failed to create project root")?;
-        let content = root.path().join("content");
-        let static_dir = root.path().join("static");
-        let output = root.path().join("public");
-        let theme = root.path().join("theme");
-
-        fs::create_dir_all(&content).context("failed to create content dir")?;
-        fs::create_dir_all(&static_dir).context("failed to create static dir")?;
-        fs::create_dir_all(theme.join("templates")).context("failed to create theme templates dir")?;
-
-        fs::write(
-            content.join("post-a.md"),
-            "---\ntitle: Post A\ntags: [rust]\n---\n\nHello A",
-        )
-        .context("failed to write post-a")?;
-        fs::write(
-            content.join("post-b.md"),
-            "---\ntitle: Post B\ncategories: [notes]\n---\n\nHello B",
-        )
-        .context("failed to write post-b")?;
-        fs::write(
-            theme.join("templates/page.html"),
-            "<!doctype html><html><body><div id=\"theme-marker\">{{ title }}</div>{{ content | safe }}</body></html>",
-        )
-        .context("failed to write theme page template")?;
-
-        let config = BuildConfig {
-            content_dir: content,
-            static_dir,
-            output_dir: output.clone(),
-            template_dir: None,
-            theme_dir: Some(theme),
-            plugin_paths: Vec::new(),
-            plugin_init_config_json: "{}".to_string(),
-            plugin_timeout_ms: 2_000,
-            plugin_memory_limit_mb: 128,
-            check_external_links: false,
-            fail_on_broken_links: false,
-            js_backend: JsBackend::Passthrough,
-            tailwind: None,
-            enable_ai_index: false,
-            max_frontmatter_bytes: 64 * 1024,
-            max_file_bytes: 10 * 1024 * 1024,
-            max_total_files: 100_000,
-            command_timeout_secs: 120,
-            base_path: "/".to_string(),
-            site_domain: None,
-            images: ImageBuildConfig::default(),
-            remote_data_sources: BTreeMap::new(),
-            i18n: I18nConfig::default(),
-            build_scope: BuildScope::Full,
-        };
-
-        build_site(&config)?;
-
-        let posts_html = fs::read_to_string(output.join("posts/index.html"))
-            .context("failed to read posts index")?;
-        let tags_html = fs::read_to_string(output.join("tags/rust/index.html"))
-            .context("failed to read tags index")?;
-        let categories_html = fs::read_to_string(output.join("categories/notes/index.html"))
-            .context("failed to read categories index")?;
-
-        assert!(posts_html.contains("theme-marker"));
-        assert!(tags_html.contains("theme-marker"));
-        assert!(categories_html.contains("theme-marker"));
-        Ok(())
-    }
-
-    #[test]
-    fn compile_islands_injects_runtime_script() {
-        let (html, has_islands) = compile_islands(
-            r#"<!doctype html><html><body><p>x</p><island name="counter" props='{"step":1}'></island></body></html>"#,
-        );
-        assert!(has_islands);
-        assert!(html.contains("data-island=\"counter\""));
-        assert!(html.contains("/_nanoss/islands-runtime.js"));
-        let script_pos = html
-            .find("/_nanoss/islands-runtime.js")
-            .expect("runtime script should be injected");
-        let body_close_pos = html.find("</body>").expect("should contain body close");
-        assert!(script_pos < body_close_pos, "runtime script must be before </body>");
-    }
-
-    #[test]
-    fn islands_runtime_exposes_register_api() -> Result<()> {
-        let out = tempdir().context("failed to create output dir")?;
-        write_islands_runtime(out.path())?;
-        let runtime = fs::read_to_string(out.path().join("_nanoss/islands-runtime.js"))
-            .context("failed to read islands runtime")?;
-        assert!(runtime.contains("window.NanossIslands"));
-        assert!(runtime.contains("register(name, handler)"));
-        assert!(runtime.contains("hydrate(targetName)"));
-        Ok(())
-    }
-
-    #[test]
-    fn route_segment_rejects_traversal() {
-        assert!(validate_route_segment("../etc", "slug").is_err());
-        assert!(validate_route_segment("ok-slug_1", "slug").is_ok());
-    }
-
-    #[test]
-    fn build_cache_schema_mismatch_resets() -> Result<()> {
-        let dir = tempdir().context("failed to create tempdir")?;
-        let cache_file = dir.path().join(BUILD_CACHE_FILE);
-        fs::write(
-            &cache_file,
-            r#"{"schema_version":1,"pages":{"k":{"hash":"h","output":"o"}}}"#,
-        )
-        .context("failed to write cache fixture")?;
-        let cache = load_build_cache(&cache_file)?;
-        assert_eq!(cache.schema_version, BUILD_CACHE_SCHEMA_VERSION);
-        assert!(cache.pages.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn data_context_supports_json_yaml_toml() -> Result<()> {
-        let dir = tempdir().context("failed to create tempdir")?;
-        fs::create_dir_all(dir.path().join("data")).context("failed to create data dir")?;
-        fs::write(dir.path().join("data/site.json"), r#"{"name":"nanoss"}"#).context("write json")?;
-        fs::write(dir.path().join("data/theme.yaml"), "kind: blog").context("write yaml")?;
-        fs::write(dir.path().join("data/build.toml"), "mode = 'fast'").context("write toml")?;
-        let data = load_data_context(dir.path(), dir.path(), &BTreeMap::new())?;
-        let obj = data.as_object().context("expected object data")?;
-        assert!(obj.contains_key("site"));
-        assert!(obj.contains_key("theme"));
-        assert!(obj.contains_key("build"));
-        Ok(())
-    }
-
-    #[test]
-    fn output_path_respects_i18n_default_locale_prefix_strategy() -> Result<()> {
-        let root = tempdir().context("failed to create root")?;
-        let content = root.path().join("content");
-        let output = root.path().join("public");
-        fs::create_dir_all(&content).context("failed to create content")?;
-        let source = content.join("hello.md");
-        fs::write(&source, "# Hello").context("failed to write source")?;
-
-        let i18n = I18nConfig {
-            locales: vec!["en".to_string(), "zh".to_string()],
-            default_locale: Some("en".to_string()),
-            prefix_default_locale: false,
-        };
-        let en = output_path_for(&source, &content, &output, Some("hello"), Some("en"), &i18n)?;
-        let zh = output_path_for(&source, &content, &output, Some("hello"), Some("zh"), &i18n)?;
-        assert_eq!(en, output.join("hello").join("index.html"));
-        assert_eq!(zh, output.join("zh").join("hello").join("index.html"));
-
-        let prefixed = I18nConfig {
-            locales: vec!["en".to_string(), "zh".to_string()],
-            default_locale: Some("en".to_string()),
-            prefix_default_locale: true,
-        };
-        let en_prefixed =
-            output_path_for(&source, &content, &output, Some("hello"), Some("en"), &prefixed)?;
-        assert_eq!(en_prefixed, output.join("en").join("hello").join("index.html"));
-        Ok(())
-    }
-
-    #[test]
-    fn process_image_asset_generates_webp_variant() -> Result<()> {
-        let root = tempdir().context("failed to create root")?;
-        let content = root.path().join("content");
-        let output = root.path().join("public");
-        fs::create_dir_all(&content).context("failed to create content dir")?;
-        fs::create_dir_all(&output).context("failed to create output dir")?;
-        let source = content.join("cover.png");
-        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
-        img.save(&source).context("failed to save source image")?;
-
-        let record = process_image_asset(
-            &source,
-            &content,
-            &output,
-            &ImageBuildConfig {
-                enabled: true,
-                generate_webp: true,
-                generate_avif: false,
-                widths: vec![8],
-            },
-        )?;
-        assert_eq!(record.width, Some(16));
-        assert!(record
-            .variants
-            .iter()
-            .any(|v| v.format == "webp" && v.width == Some(8)));
-        for variant in &record.variants {
-            assert!(PathBuf::from(&variant.output).exists());
-        }
-        Ok(())
-    }
-}
+mod tests;

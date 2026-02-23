@@ -24,7 +24,11 @@ const THEMES_DIR: &str = ".nanoss/themes";
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
-#[command(name = "nanoss", version, about = "A modern Rust static site generator")]
+#[command(
+    name = "nanoss",
+    version,
+    about = "A modern Rust static site generator"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -157,8 +161,12 @@ enum PluginCommand {
         #[arg(long, default_value_t = true)]
         official: bool,
     },
-    Enable { id: String },
-    Disable { id: String },
+    Enable {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
     Update {
         id: String,
         #[arg(long)]
@@ -242,10 +250,14 @@ fn run_init(args: InitArgs) -> Result<()> {
 fn run_new(args: NewArgs) -> Result<()> {
     let force = args.force;
     match (args.kind, args.name) {
-        (Some(NewCommand::Site { name }), None) => create_new_site_scaffold(Path::new(&name), force),
+        (Some(NewCommand::Site { name }), None) => {
+            create_new_site_scaffold(Path::new(&name), force)
+        }
         (Some(NewCommand::Theme { name }), None) => create_theme_scaffold(&name, force),
         (Some(NewCommand::Page { path }), None) => create_page_scaffold(&path, force),
-        (Some(NewCommand::Plugin { name }), None) => create_plugin_scaffold(Path::new("plugins"), &name, force),
+        (Some(NewCommand::Plugin { name }), None) => {
+            create_plugin_scaffold(Path::new("plugins"), &name, force)
+        }
         (None, Some(name)) => {
             let selected = prompt_new_kind(&name, io::stdin().lock(), io::stdout())?;
             match selected {
@@ -255,7 +267,9 @@ fn run_new(args: NewArgs) -> Result<()> {
                 NewKind::Plugin => create_plugin_scaffold(Path::new("plugins"), &name, force),
             }
         }
-        (None, None) => bail!("usage: nanoss new <name> or nanoss new <site|theme|page|plugin> <value>"),
+        (None, None) => {
+            bail!("usage: nanoss new <name> or nanoss new <site|theme|page|plugin> <value>")
+        }
         _ => bail!("when using explicit new type, do not pass extra unnamed args"),
     }?;
     Ok(())
@@ -269,7 +283,11 @@ enum NewKind {
     Plugin,
 }
 
-fn prompt_new_kind<R: BufRead, W: Write>(name: &str, mut input: R, mut output: W) -> Result<NewKind> {
+fn prompt_new_kind<R: BufRead, W: Write>(
+    name: &str,
+    mut input: R,
+    mut output: W,
+) -> Result<NewKind> {
     writeln!(
         output,
         "Select type for '{}':\n  1) site\n  2) theme\n  3) page\n  4) plugin",
@@ -281,7 +299,9 @@ fn prompt_new_kind<R: BufRead, W: Write>(name: &str, mut input: R, mut output: W
 
     for _ in 0..3 {
         let mut line = String::new();
-        input.read_line(&mut line).context("failed to read selection")?;
+        input
+            .read_line(&mut line)
+            .context("failed to read selection")?;
         let choice = line.trim().to_ascii_lowercase();
         let selected = match choice.as_str() {
             "1" | "site" => Some(NewKind::Site),
@@ -293,7 +313,8 @@ fn prompt_new_kind<R: BufRead, W: Write>(name: &str, mut input: R, mut output: W
         if let Some(kind) = selected {
             return Ok(kind);
         }
-        writeln!(output, "invalid choice, please enter 1/2/3/4").context("failed to write prompt")?;
+        writeln!(output, "invalid choice, please enter 1/2/3/4")
+            .context("failed to write prompt")?;
         write!(output, "Enter choice [1-4]: ").context("failed to write prompt")?;
         output.flush().context("failed to flush prompt")?;
     }
@@ -305,6 +326,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
 }
 
 fn run_build_with_scope(args: &BuildArgs, build_scope: BuildScope) -> Result<()> {
+    tracing::info!(event_name = "cli.build.start", scope = ?build_scope);
     let config = load_project_config()?;
     let base_path = args
         .base_path
@@ -397,6 +419,7 @@ fn run_build_with_scope(args: &BuildArgs, build_scope: BuildScope) -> Result<()>
             prefix_default_locale: config.build.i18n.prefix_default_locale,
         },
         build_scope,
+        metrics: None,
     })?;
     println!(
         "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, processed {} images, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
@@ -411,6 +434,11 @@ fn run_build_with_scope(args: &BuildArgs, build_scope: BuildScope) -> Result<()>
         report.ai_indexed_pages,
         report.checked_external_links,
         report.broken_external_links
+    );
+    tracing::info!(
+        event_name = "cli.build.finish",
+        rendered_pages = report.rendered_pages,
+        skipped_pages = report.skipped_pages
     );
     Ok(())
 }
@@ -553,7 +581,11 @@ fn run_plugin(command: PluginCommand) -> Result<()> {
                     } else {
                         "disabled"
                     };
-                    println!("{id} {} ({enabled}) -> {}", entry.version, entry.wasm_path.display());
+                    println!(
+                        "{id} {} ({enabled}) -> {}",
+                        entry.version,
+                        entry.wasm_path.display()
+                    );
                 }
             }
         }
@@ -565,7 +597,12 @@ fn run_plugin(command: PluginCommand) -> Result<()> {
             official,
         } => {
             let entry = install_plugin(&id, &version, &source, &min_host_version, official)?;
-            println!("Installed plugin {}@{} -> {}", entry.id, entry.version, entry.wasm_path.display());
+            println!(
+                "Installed plugin {}@{} -> {}",
+                entry.id,
+                entry.version,
+                entry.wasm_path.display()
+            );
         }
         PluginCommand::Enable { id } => {
             let registry = load_plugin_registry()?;
@@ -583,9 +620,18 @@ fn run_plugin(command: PluginCommand) -> Result<()> {
             save_project_config(&config)?;
             println!("Disabled plugin {id}");
         }
-        PluginCommand::Update { id, version, source } => {
+        PluginCommand::Update {
+            id,
+            version,
+            source,
+        } => {
             let entry = install_plugin(&id, &version, &source, HOST_VERSION, true)?;
-            println!("Updated plugin {}@{} -> {}", entry.id, entry.version, entry.wasm_path.display());
+            println!(
+                "Updated plugin {}@{} -> {}",
+                entry.id,
+                entry.version,
+                entry.wasm_path.display()
+            );
         }
     }
     Ok(())
@@ -650,14 +696,22 @@ fn create_site_scaffold(root: &Path, force: bool) -> Result<()> {
         "---\ntitle: Home\n---\n\n# Welcome to Nanoss\n\nThis site is scaffolded by `nanoss init/new`.\n",
         force,
     )?;
-    create_if_missing(&root.join("content/styles/site.css"), starter_site_css(), force)?;
+    create_if_missing(
+        &root.join("content/styles/site.css"),
+        starter_site_css(),
+        force,
+    )?;
     create_if_missing(
         &root.join("content/scripts/site.js"),
         "console.log(\"nanoss starter loaded\");\n",
         force,
     )?;
     create_if_missing(&root.join("static/.gitkeep"), "", force)?;
-    create_if_missing(&root.join("templates/page.html"), starter_page_template(), force)?;
+    create_if_missing(
+        &root.join("templates/page.html"),
+        starter_page_template(),
+        force,
+    )?;
     Ok(())
 }
 
@@ -676,7 +730,11 @@ fn create_theme_scaffold(name: &str, force: bool) -> Result<()> {
         &format!("name = \"{}\"\nversion = \"0.1.0\"\n", name),
         force,
     )?;
-    create_if_missing(&dir.join("templates/page.html"), starter_theme_template(), force)?;
+    create_if_missing(
+        &dir.join("templates/page.html"),
+        starter_theme_template(),
+        force,
+    )?;
     create_if_missing(&dir.join("static/theme.css"), starter_theme_css(), force)?;
     create_if_missing(&dir.join("static/.gitkeep"), "", force)?;
     println!("Created theme at {}", dir.display());
@@ -712,7 +770,8 @@ fn create_plugin_scaffold(root: &Path, name: &str, force: bool) -> Result<()> {
             dir.display()
         );
     }
-    fs::create_dir_all(dir.join("src")).with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(dir.join("src"))
+        .with_context(|| format!("failed to create {}", dir.display()))?;
     let crate_name = format!("nanoss-plugin-{}", name.replace('-', "_"));
     create_if_missing(
         &dir.join("Cargo.toml"),
@@ -739,7 +798,8 @@ fn create_plugin_scaffold(root: &Path, name: &str, force: bool) -> Result<()> {
 fn create_if_missing(path: &Path, content: &str, force: bool) -> Result<()> {
     if path.exists() {
         if force {
-            fs::write(path, content).with_context(|| format!("failed to overwrite {}", path.display()))?;
+            fs::write(path, content)
+                .with_context(|| format!("failed to overwrite {}", path.display()))?;
             println!("overwrite {}", path.display());
             return Ok(());
         }
@@ -747,7 +807,8 @@ fn create_if_missing(path: &Path, content: &str, force: bool) -> Result<()> {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -965,8 +1026,13 @@ fn install_plugin(
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).context("failed to create plugin install directory")?;
     }
-    fs::copy(source, &target)
-        .with_context(|| format!("failed to copy plugin {} -> {}", source.display(), target.display()))?;
+    fs::copy(source, &target).with_context(|| {
+        format!(
+            "failed to copy plugin {} -> {}",
+            source.display(),
+            target.display()
+        )
+    })?;
 
     let entry = PluginRegistryEntry {
         id: id.to_string(),
@@ -988,13 +1054,15 @@ fn load_project_config() -> Result<ProjectConfig> {
     if !path.exists() {
         return Ok(ProjectConfig::default());
     }
-    let raw = fs::read_to_string(&path).with_context(|| format!("failed to read {}", PROJECT_CONFIG_FILE))?;
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", PROJECT_CONFIG_FILE))?;
     toml::from_str(&raw).with_context(|| format!("failed to parse {}", PROJECT_CONFIG_FILE))
 }
 
 fn save_project_config(config: &ProjectConfig) -> Result<()> {
     let raw = toml::to_string_pretty(config).context("failed to serialize project config")?;
-    fs::write(PROJECT_CONFIG_FILE, raw).with_context(|| format!("failed to write {}", PROJECT_CONFIG_FILE))
+    fs::write(PROJECT_CONFIG_FILE, raw)
+        .with_context(|| format!("failed to write {}", PROJECT_CONFIG_FILE))
 }
 
 fn load_plugin_registry() -> Result<PluginRegistry> {
@@ -1002,8 +1070,8 @@ fn load_plugin_registry() -> Result<PluginRegistry> {
     if !path.exists() {
         return Ok(PluginRegistry::default());
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("failed to read plugin registry {}", path.display()))?;
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read plugin registry {}", path.display()))?;
     serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse plugin registry {}", path.display()))
 }
@@ -1011,9 +1079,11 @@ fn load_plugin_registry() -> Result<PluginRegistry> {
 fn save_plugin_registry(registry: &PluginRegistry) -> Result<()> {
     let path = PathBuf::from(PLUGIN_REGISTRY_FILE);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let raw = serde_json::to_string_pretty(registry).context("failed to serialize plugin registry")?;
+    let raw =
+        serde_json::to_string_pretty(registry).context("failed to serialize plugin registry")?;
     fs::write(&path, raw).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -1050,7 +1120,10 @@ fn spawn_watch_thread(build: BuildArgs) -> Result<()> {
                 .watch(template_dir, RecursiveMode::Recursive)
                 .context("failed to watch template directory")?;
         } else {
-            eprintln!("warning: template directory not found, skipping watch: {}", template_dir.display());
+            eprintln!(
+                "warning: template directory not found, skipping watch: {}",
+                template_dir.display()
+            );
         }
     }
 
@@ -1130,7 +1203,11 @@ fn classify_watch_change(build: &BuildArgs, changed: &[PathBuf]) -> &'static str
     "mixed"
 }
 
-fn handle_static_request(request: tiny_http::Request, output_dir: &Path, mount_path: &str) -> Result<()> {
+fn handle_static_request(
+    request: tiny_http::Request,
+    output_dir: &Path,
+    mount_path: &str,
+) -> Result<()> {
     let url_path = request
         .url()
         .split('?')
@@ -1157,7 +1234,8 @@ fn handle_static_request(request: tiny_http::Request, output_dir: &Path, mount_p
             .context("failed to send 404 response")?;
         return Ok(());
     }
-    let mut file = fs::File::open(&target).with_context(|| format!("failed to open {}", target.display()))?;
+    let mut file =
+        fs::File::open(&target).with_context(|| format!("failed to open {}", target.display()))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .with_context(|| format!("failed to read {}", target.display()))?;

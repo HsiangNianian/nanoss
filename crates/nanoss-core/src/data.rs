@@ -21,10 +21,9 @@ pub(crate) fn load_data_context(
             if !entry.file_type().is_file() {
                 continue;
             }
-            let rel = entry
-                .path()
-                .strip_prefix(&data_dir)
-                .with_context(|| format!("failed to relativize data file {}", entry.path().display()))?;
+            let rel = entry.path().strip_prefix(&data_dir).with_context(|| {
+                format!("failed to relativize data file {}", entry.path().display())
+            })?;
             let key = rel
                 .with_extension("")
                 .to_string_lossy()
@@ -32,14 +31,19 @@ pub(crate) fn load_data_context(
             let raw = fs::read_to_string(entry.path())
                 .with_context(|| format!("failed to read data file {}", entry.path().display()))?;
             let value = match entry.path().extension().and_then(OsStr::to_str) {
-                Some("json") => serde_json::from_str(&raw)
-                    .with_context(|| format!("failed to parse json data {}", entry.path().display()))?,
+                Some("json") => serde_json::from_str(&raw).with_context(|| {
+                    format!("failed to parse json data {}", entry.path().display())
+                })?,
                 Some("yaml") | Some("yml") => serde_yaml::from_str::<serde_json::Value>(&raw)
-                    .with_context(|| format!("failed to parse yaml data {}", entry.path().display()))?,
+                    .with_context(|| {
+                        format!("failed to parse yaml data {}", entry.path().display())
+                    })?,
                 Some("toml") => {
-                    let toml_value: toml::Value = toml::from_str(&raw)
-                        .with_context(|| format!("failed to parse toml data {}", entry.path().display()))?;
-                    serde_json::to_value(toml_value).context("failed to convert toml data to json value")?
+                    let toml_value: toml::Value = toml::from_str(&raw).with_context(|| {
+                        format!("failed to parse toml data {}", entry.path().display())
+                    })?;
+                    serde_json::to_value(toml_value)
+                        .context("failed to convert toml data to json value")?
                 }
                 _ => continue,
             };
@@ -69,8 +73,12 @@ pub(crate) fn fetch_remote_data_sources_with_http(
         return Ok(BTreeMap::new());
     }
     let cache_dir = output_dir.join(".nanoss-cache").join("remote-data");
-    fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("failed to create remote data cache dir {}", cache_dir.display()))?;
+    fs::create_dir_all(&cache_dir).with_context(|| {
+        format!(
+            "failed to create remote data cache dir {}",
+            cache_dir.display()
+        )
+    })?;
 
     let mut resolved = BTreeMap::new();
     for (key, source) in remote_sources {
@@ -79,23 +87,33 @@ pub(crate) fn fetch_remote_data_sources_with_http(
         let mut loaded = None;
         if method == "GET" {
             if let Ok(value) = http.get_json(&source.url, 15, "nanoss-remote-data/0.1") {
-                fs::write(&cache_file, serde_json::to_vec_pretty(&value)?)
-                    .with_context(|| format!("failed to persist remote data cache {}", cache_file.display()))?;
+                fs::write(&cache_file, serde_json::to_vec_pretty(&value)?).with_context(|| {
+                    format!(
+                        "failed to persist remote data cache {}",
+                        cache_file.display()
+                    )
+                })?;
                 loaded = Some(value);
             }
         }
         if loaded.is_none() && cache_file.exists() {
-            let cached = fs::read_to_string(&cache_file)
-                .with_context(|| format!("failed to read cached remote data {}", cache_file.display()))?;
-            loaded = Some(
-                serde_json::from_str(&cached)
-                    .with_context(|| format!("failed to parse cached remote data {}", cache_file.display()))?,
-            );
+            let cached = fs::read_to_string(&cache_file).with_context(|| {
+                format!("failed to read cached remote data {}", cache_file.display())
+            })?;
+            loaded = Some(serde_json::from_str(&cached).with_context(|| {
+                format!(
+                    "failed to parse cached remote data {}",
+                    cache_file.display()
+                )
+            })?);
         }
         if let Some(value) = loaded {
             resolved.insert(key.clone(), value);
         } else if source.fail_fast {
-            bail!("remote data source '{}' failed and no cache is available", key);
+            bail!(
+                "remote data source '{}' failed and no cache is available",
+                key
+            );
         }
     }
     Ok(resolved)

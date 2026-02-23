@@ -28,9 +28,13 @@ pub(crate) fn output_path_for(
         return Ok(candidate);
     }
 
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let mut target = output_root.to_path_buf();
     if let Some(locale) = locale_segment.as_deref() {
         target = target.join(locale);
@@ -41,7 +45,10 @@ pub(crate) fn output_path_for(
     Ok(target)
 }
 
-pub(crate) fn locale_prefix_for_output(lang: Option<&str>, i18n: &I18nConfig) -> Result<Option<String>> {
+pub(crate) fn locale_prefix_for_output(
+    lang: Option<&str>,
+    i18n: &I18nConfig,
+) -> Result<Option<String>> {
     let Some(locale) = lang.or(i18n.default_locale.as_deref()) else {
         return Ok(None);
     };
@@ -123,10 +130,17 @@ pub(crate) fn rewrite_html_absolute_links_with_base_path(html: &str, base_path: 
     }
     let mut out = String::with_capacity(html.len() + 32);
     let mut idx = 0usize;
-    while let Some(rel) = html[idx..].find("href=\"/").or_else(|| html[idx..].find("src=\"/")) {
+    while let Some(rel) = html[idx..]
+        .find("href=\"/")
+        .or_else(|| html[idx..].find("src=\"/"))
+    {
         let start = idx + rel;
         out.push_str(&html[idx..start]);
-        let attr = if html[start..].starts_with("href=\"/") { "href" } else { "src" };
+        let attr = if html[start..].starts_with("href=\"/") {
+            "href"
+        } else {
+            "src"
+        };
         let value_start = start + attr.len() + 2;
         if let Some(end_quote_rel) = html[value_start..].find('"') {
             let value_end = value_start + end_quote_rel;
@@ -151,9 +165,13 @@ pub(crate) fn asset_output_path(
     output_root: &Path,
     force_ext: Option<&str>,
 ) -> Result<PathBuf> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let mut target = output_root.join(rel);
     if let Some(ext) = force_ext {
         target.set_extension(ext);

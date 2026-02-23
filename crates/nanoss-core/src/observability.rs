@@ -20,8 +20,14 @@ pub(crate) fn emit_event(stage: &str, build_id: &str, payload: serde_json::Value
         "nanoss event"
     );
     let mut obj = serde_json::Map::new();
-    obj.insert("stage".to_string(), serde_json::Value::String(stage.to_string()));
-    obj.insert("build_id".to_string(), serde_json::Value::String(build_id.to_string()));
+    obj.insert(
+        "stage".to_string(),
+        serde_json::Value::String(stage.to_string()),
+    );
+    obj.insert(
+        "build_id".to_string(),
+        serde_json::Value::String(build_id.to_string()),
+    );
     obj.insert("payload".to_string(), payload);
     println!("{}", serde_json::Value::Object(obj));
 }

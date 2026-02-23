@@ -12,7 +12,10 @@ pub(crate) fn build_semantic_index(content_dir: &Path, output_dir: &Path) -> Res
     let files: Vec<PathBuf> = WalkDir::new(content_dir)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && entry.path().extension().and_then(OsStr::to_str) == Some("md"))
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.path().extension().and_then(OsStr::to_str) == Some("md")
+        })
         .map(|entry| entry.path().to_path_buf())
         .collect();
     let docs: Vec<SemanticIndexDoc> = files
@@ -22,7 +25,11 @@ pub(crate) fn build_semantic_index(content_dir: &Path, output_dir: &Path) -> Res
             let (frontmatter, body) = crate::render::parse_frontmatter(&raw).ok()?;
             let title = frontmatter
                 .title
-                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+                .or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(ToOwned::to_owned)
+                })
                 .unwrap_or_else(|| "Untitled".to_string());
             Some(SemanticIndexDoc {
                 path: path.display().to_string(),
@@ -34,8 +41,12 @@ pub(crate) fn build_semantic_index(content_dir: &Path, output_dir: &Path) -> Res
 
     let semantic_path = output_dir.join("search").join("semantic-index.json");
     if let Some(parent) = semantic_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create semantic index parent {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create semantic index parent {}",
+                parent.display()
+            )
+        })?;
     }
     let json = serde_json::to_string_pretty(&docs).context("failed to serialize semantic index")?;
     fs::write(&semantic_path, json)

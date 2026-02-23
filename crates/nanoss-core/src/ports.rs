@@ -7,8 +7,15 @@ use reqwest::blocking::Client;
 use reqwest::Method;
 
 pub trait HttpPort: Send + Sync {
-    fn request_status(&self, method: Method, url: &str, timeout_secs: u64, user_agent: &str) -> Option<u16>;
-    fn get_json(&self, url: &str, timeout_secs: u64, user_agent: &str) -> Result<serde_json::Value>;
+    fn request_status(
+        &self,
+        method: Method,
+        url: &str,
+        timeout_secs: u64,
+        user_agent: &str,
+    ) -> Option<u16>;
+    fn get_json(&self, url: &str, timeout_secs: u64, user_agent: &str)
+        -> Result<serde_json::Value>;
 }
 
 pub trait FileSystemPort: Send + Sync {
@@ -34,7 +41,8 @@ impl FileSystemPort for StdFileSystemPort {
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<()> {
-        std::fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("failed to create {}", path.display()))
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -45,7 +53,13 @@ impl FileSystemPort for StdFileSystemPort {
 pub struct StdHttpPort;
 
 impl HttpPort for StdHttpPort {
-    fn request_status(&self, method: Method, url: &str, timeout_secs: u64, user_agent: &str) -> Option<u16> {
+    fn request_status(
+        &self,
+        method: Method,
+        url: &str,
+        timeout_secs: u64,
+        user_agent: &str,
+    ) -> Option<u16> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent(user_agent)
@@ -58,7 +72,12 @@ impl HttpPort for StdHttpPort {
             .map(|response| response.status().as_u16())
     }
 
-    fn get_json(&self, url: &str, timeout_secs: u64, user_agent: &str) -> Result<serde_json::Value> {
+    fn get_json(
+        &self,
+        url: &str,
+        timeout_secs: u64,
+        user_agent: &str,
+    ) -> Result<serde_json::Value> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent(user_agent)
@@ -81,7 +100,7 @@ pub struct StdProcessPort;
 
 impl ProcessPort for StdProcessPort {
     fn run(&self, binary: &str, args: &[String], timeout_secs: u64) -> Result<()> {
-        crate::ensure_binary_name_safe(binary)?;
+        crate::validation::ensure_binary_name_safe(binary)?;
         let mut cmd = Command::new(binary);
         for arg in args {
             cmd.arg(arg);
@@ -91,7 +110,7 @@ impl ProcessPort for StdProcessPort {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to execute {binary}"))?;
-        let status = crate::wait_child_with_timeout(&mut child, timeout_secs)
+        let status = crate::utils::wait_child_with_timeout(&mut child, timeout_secs)
             .with_context(|| format!("{binary} timed out"))?;
         if !status.success() {
             bail!("{binary} failed");
@@ -99,4 +118,3 @@ impl ProcessPort for StdProcessPort {
         Ok(())
     }
 }
-

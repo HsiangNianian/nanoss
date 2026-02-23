@@ -17,7 +17,9 @@ pub(crate) fn collect_content_entries(
 ) -> Result<Vec<ContentEntry>> {
     let mut entries = Vec::new();
     for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() || entry.path().extension().and_then(OsStr::to_str) != Some("md") {
+        if !entry.file_type().is_file()
+            || entry.path().extension().and_then(OsStr::to_str) != Some("md")
+        {
             continue;
         }
         let raw = fs::read_to_string(entry.path())
@@ -41,7 +43,13 @@ pub(crate) fn collect_content_entries(
         entries.push(ContentEntry {
             title: fm
                 .title
-                .or_else(|| entry.path().file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+                .or_else(|| {
+                    entry
+                        .path()
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(ToOwned::to_owned)
+                })
                 .unwrap_or_else(|| "Untitled".to_string()),
             url,
             date: fm.date,
@@ -60,7 +68,9 @@ pub(crate) fn render_organization_page(
     title: &str,
     body_html: &str,
 ) -> Result<String> {
-    let tmpl = env.get_template("page.html").context("missing page.html template")?;
+    let tmpl = env
+        .get_template("page.html")
+        .context("missing page.html template")?;
     let rendered = tmpl
         .render(context! {
             title => title,
@@ -74,7 +84,9 @@ pub(crate) fn render_organization_page(
             base_href_prefix => crate::path::base_href_prefix(base_path)
         })
         .context("failed to render organization page template")?;
-    Ok(crate::path::rewrite_html_absolute_links_with_base_path(&rendered, base_path))
+    Ok(crate::path::rewrite_html_absolute_links_with_base_path(
+        &rendered, base_path,
+    ))
 }
 
 pub(crate) fn generate_content_organization_outputs(
@@ -88,7 +100,8 @@ pub(crate) fn generate_content_organization_outputs(
         return Ok(());
     }
     let posts_dir = output_dir.join("posts");
-    fs::create_dir_all(&posts_dir).with_context(|| format!("failed to create {}", posts_dir.display()))?;
+    fs::create_dir_all(&posts_dir)
+        .with_context(|| format!("failed to create {}", posts_dir.display()))?;
     let per_page = 10usize;
     for (idx, chunk) in entries.chunks(per_page).enumerate() {
         let page_num = idx + 1;
@@ -97,14 +110,19 @@ pub(crate) fn generate_content_organization_outputs(
         } else {
             posts_dir.join("page").join(page_num.to_string())
         };
-        fs::create_dir_all(&page_dir).with_context(|| format!("failed to create {}", page_dir.display()))?;
+        fs::create_dir_all(&page_dir)
+            .with_context(|| format!("failed to create {}", page_dir.display()))?;
         let mut body = String::from("<h1>Posts</h1><ul>");
         for item in chunk {
-            body.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
+            body.push_str(&format!(
+                "<li><a href=\"{}\">{}</a></li>",
+                item.url, item.title
+            ));
         }
         body.push_str("</ul>");
         let html = render_organization_page(env, data_context, base_path, "Posts", &body)?;
-        fs::write(page_dir.join("index.html"), html).with_context(|| "failed to write posts page".to_string())?;
+        fs::write(page_dir.join("index.html"), html)
+            .with_context(|| "failed to write posts page".to_string())?;
     }
 
     let mut tags: BTreeMap<String, Vec<&ContentEntry>> = BTreeMap::new();
@@ -117,7 +135,14 @@ pub(crate) fn generate_content_organization_outputs(
             categories.entry(category.clone()).or_default().push(item);
         }
     }
-    write_taxonomy_pages(output_dir.join("tags"), "Tags", &tags, env, data_context, base_path)?;
+    write_taxonomy_pages(
+        output_dir.join("tags"),
+        "Tags",
+        &tags,
+        env,
+        data_context,
+        base_path,
+    )?;
     write_taxonomy_pages(
         output_dir.join("categories"),
         "Categories",
@@ -144,10 +169,19 @@ pub(crate) fn write_taxonomy_pages(
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let mut body = format!("<h1>{}: {}</h1><ul>", heading, name);
         for item in entries {
-            body.push_str(&format!("<li><a href=\"{}\">{}</a></li>", item.url, item.title));
+            body.push_str(&format!(
+                "<li><a href=\"{}\">{}</a></li>",
+                item.url, item.title
+            ));
         }
         body.push_str("</ul>");
-        let html = render_organization_page(env, data_context, base_path, &format!("{}: {}", heading, name), &body)?;
+        let html = render_organization_page(
+            env,
+            data_context,
+            base_path,
+            &format!("{}: {}", heading, name),
+            &body,
+        )?;
         fs::write(dir.join("index.html"), html)
             .with_context(|| format!("failed to write taxonomy page {}", dir.display()))?;
     }

@@ -9,7 +9,10 @@ pub(crate) fn load_build_cache(path: &Path) -> Result<BuildCache> {
     load_build_cache_with_fs(path, &StdFileSystemPort)
 }
 
-pub(crate) fn load_build_cache_with_fs(path: &Path, fs_port: &dyn FileSystemPort) -> Result<BuildCache> {
+pub(crate) fn load_build_cache_with_fs(
+    path: &Path,
+    fs_port: &dyn FileSystemPort,
+) -> Result<BuildCache> {
     if !fs_port.exists(path) {
         return Ok(BuildCache::default());
     }

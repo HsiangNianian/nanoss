@@ -11,7 +11,11 @@ use rswind::create_processor;
 use walkdir::WalkDir;
 
 use crate::ports::{ProcessPort, StdProcessPort};
-use crate::{optimize_css, CacheImageRecord, ImageBuildConfig, ImageVariantRecord, JsBackend, TailwindBackend, TailwindConfig, CLASS_ATTR_RE};
+use crate::utils::optimize_css;
+use crate::{
+    CacheImageRecord, ImageBuildConfig, ImageVariantRecord, JsBackend, TailwindBackend,
+    TailwindConfig, CLASS_ATTR_RE,
+};
 
 pub(crate) fn process_script_asset(
     source: &Path,
@@ -20,7 +24,14 @@ pub(crate) fn process_script_asset(
     backend: JsBackend,
     timeout_secs: u64,
 ) -> Result<()> {
-    process_script_asset_with_executor(source, content_root, output_root, backend, timeout_secs, &StdProcessPort)
+    process_script_asset_with_executor(
+        source,
+        content_root,
+        output_root,
+        backend,
+        timeout_secs,
+        &StdProcessPort,
+    )
 }
 
 pub(crate) fn process_script_asset_with_executor(
@@ -31,9 +42,13 @@ pub(crate) fn process_script_asset_with_executor(
     timeout_secs: u64,
     executor: &dyn ProcessPort,
 ) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let mut target = output_root.join(rel);
     if source.extension().and_then(OsStr::to_str) == Some("ts") {
         target.set_extension("js");
@@ -45,8 +60,13 @@ pub(crate) fn process_script_asset_with_executor(
 
     match backend {
         JsBackend::Passthrough => {
-            fs::copy(source, &target)
-                .with_context(|| format!("failed to copy script {} -> {}", source.display(), target.display()))?;
+            fs::copy(source, &target).with_context(|| {
+                format!(
+                    "failed to copy script {} -> {}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
         }
         JsBackend::Esbuild => {
             let args = vec![
@@ -64,7 +84,11 @@ pub(crate) fn process_script_asset_with_executor(
     Ok(())
 }
 
-pub(crate) fn run_tailwind(config: &TailwindConfig, content_dir: &Path, timeout_secs: u64) -> Result<()> {
+pub(crate) fn run_tailwind(
+    config: &TailwindConfig,
+    content_dir: &Path,
+    timeout_secs: u64,
+) -> Result<()> {
     match config.backend {
         TailwindBackend::Standalone => run_tailwind_standalone(config, timeout_secs),
         TailwindBackend::Rswind => run_tailwind_rswind(config, content_dir),
@@ -81,8 +105,12 @@ pub(crate) fn run_tailwind_standalone_with_executor(
     executor: &dyn ProcessPort,
 ) -> Result<()> {
     if let Some(parent) = config.output_css.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create tailwind output parent {}",
+                parent.display()
+            )
+        })?;
     }
     let mut args = vec![
         "-i".to_string(),
@@ -101,8 +129,12 @@ pub(crate) fn run_tailwind_standalone_with_executor(
 
 pub(crate) fn run_tailwind_rswind(config: &TailwindConfig, content_dir: &Path) -> Result<()> {
     if let Some(parent) = config.output_css.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create tailwind output parent {}",
+                parent.display()
+            )
+        })?;
     }
 
     let mut classes = Vec::new();
@@ -123,15 +155,28 @@ pub(crate) fn run_tailwind_rswind(config: &TailwindConfig, content_dir: &Path) -
     if config.minify {
         css = optimize_css(&config.output_css, &css)?;
     }
-    fs::write(&config.output_css, css)
-        .with_context(|| format!("failed to write rswind output {}", config.output_css.display()))?;
+    fs::write(&config.output_css, css).with_context(|| {
+        format!(
+            "failed to write rswind output {}",
+            config.output_css.display()
+        )
+    })?;
     Ok(())
 }
 
-pub(crate) fn compile_sass_file(source: &Path, content_root: &Path, output_root: &Path, _timeout_secs: u64) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+pub(crate) fn compile_sass_file(
+    source: &Path,
+    content_root: &Path,
+    output_root: &Path,
+    _timeout_secs: u64,
+) -> Result<()> {
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let mut target = output_root.join(rel);
     target.set_extension("css");
 
@@ -143,14 +188,23 @@ pub(crate) fn compile_sass_file(source: &Path, content_root: &Path, output_root:
     let css = grass::from_path(source, &grass::Options::default())
         .with_context(|| format!("failed to compile Sass file {}", source.display()))?;
     let optimized = optimize_css(source, &css)?;
-    fs::write(&target, optimized).with_context(|| format!("failed to write Sass output {}", target.display()))?;
+    fs::write(&target, optimized)
+        .with_context(|| format!("failed to write Sass output {}", target.display()))?;
     Ok(())
 }
 
-pub(crate) fn process_css_asset(source: &Path, content_root: &Path, output_root: &Path) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+pub(crate) fn process_css_asset(
+    source: &Path,
+    content_root: &Path,
+    output_root: &Path,
+) -> Result<()> {
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let target = output_root.join(rel);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -164,17 +218,30 @@ pub(crate) fn process_css_asset(source: &Path, content_root: &Path, output_root:
     Ok(())
 }
 
-pub(crate) fn copy_asset_file(source: &Path, content_root: &Path, output_root: &Path) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+pub(crate) fn copy_asset_file(
+    source: &Path,
+    content_root: &Path,
+    output_root: &Path,
+) -> Result<()> {
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let target = output_root.join(rel);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
     }
-    fs::copy(source, &target)
-        .with_context(|| format!("failed to copy asset {} -> {}", source.display(), target.display()))?;
+    fs::copy(source, &target).with_context(|| {
+        format!(
+            "failed to copy asset {} -> {}",
+            source.display(),
+            target.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -184,19 +251,28 @@ pub(crate) fn process_image_asset(
     output_root: &Path,
     image_config: &ImageBuildConfig,
 ) -> Result<CacheImageRecord> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let rel = source.strip_prefix(content_root).with_context(|| {
+        format!(
+            "{} is not inside {}",
+            source.display(),
+            content_root.display()
+        )
+    })?;
     let target = output_root.join(rel);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
     }
-    fs::copy(source, &target)
-        .with_context(|| format!("failed to copy image {} -> {}", source.display(), target.display()))?;
+    fs::copy(source, &target).with_context(|| {
+        format!(
+            "failed to copy image {} -> {}",
+            source.display(),
+            target.display()
+        )
+    })?;
 
     let mut record = CacheImageRecord {
-        hash: crate::hashed_file_content(source),
+        hash: crate::utils::hashed_file_content(source),
         output: target.display().to_string(),
         width: None,
         height: None,
@@ -207,7 +283,8 @@ pub(crate) fn process_image_asset(
         return Ok(record);
     }
 
-    let img = image::open(source).with_context(|| format!("failed to open image {}", source.display()))?;
+    let img = image::open(source)
+        .with_context(|| format!("failed to open image {}", source.display()))?;
     let (orig_w, orig_h) = img.dimensions();
     record.width = Some(orig_w);
     record.height = Some(orig_h);
@@ -272,7 +349,8 @@ pub(crate) fn write_image_variant(
         }
         _ => return Ok(None),
     }
-    fs::write(&path, bytes).with_context(|| format!("failed to write variant {}", path.display()))?;
+    fs::write(&path, bytes)
+        .with_context(|| format!("failed to write variant {}", path.display()))?;
     Ok(Some(path))
 }
 
