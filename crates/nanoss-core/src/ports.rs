@@ -11,8 +11,35 @@ pub trait HttpPort: Send + Sync {
     fn get_json(&self, url: &str, timeout_secs: u64, user_agent: &str) -> Result<serde_json::Value>;
 }
 
+pub trait FileSystemPort: Send + Sync {
+    fn read_to_string(&self, path: &Path) -> Result<String>;
+    fn write_string(&self, path: &Path, content: &str) -> Result<()>;
+    fn create_dir_all(&self, path: &Path) -> Result<()>;
+    fn exists(&self, path: &Path) -> bool;
+}
+
 pub trait ProcessPort: Send + Sync {
     fn run(&self, binary: &str, args: &[String], timeout_secs: u64) -> Result<()>;
+}
+
+pub struct StdFileSystemPort;
+
+impl FileSystemPort for StdFileSystemPort {
+    fn read_to_string(&self, path: &Path) -> Result<String> {
+        std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+    }
+
+    fn write_string(&self, path: &Path, content: &str) -> Result<()> {
+        std::fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    fn create_dir_all(&self, path: &Path) -> Result<()> {
+        std::fs::create_dir_all(path).with_context(|| format!("failed to create {}", path.display()))
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
 }
 
 pub struct StdHttpPort;
@@ -73,6 +100,3 @@ impl ProcessPort for StdProcessPort {
     }
 }
 
-pub(crate) fn to_owned_path_arg(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
