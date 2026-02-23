@@ -7,7 +7,8 @@ use anyhow::{bail, Context, Result};
 use rswind::create_processor;
 use walkdir::WalkDir;
 
-use crate::{optimize_css, wait_child_with_timeout, JsBackend, TailwindBackend, TailwindConfig, CLASS_ATTR_RE};
+use crate::ports::{ProcessPort, StdProcessPort};
+use crate::{optimize_css, JsBackend, TailwindBackend, TailwindConfig, CLASS_ATTR_RE};
 
 pub(crate) fn process_script_asset(
     source: &Path,
@@ -15,6 +16,17 @@ pub(crate) fn process_script_asset(
     output_root: &Path,
     backend: JsBackend,
     timeout_secs: u64,
+) -> Result<()> {
+    process_script_asset_with_executor(source, content_root, output_root, backend, timeout_secs, &StdProcessPort)
+}
+
+pub(crate) fn process_script_asset_with_executor(
+    source: &Path,
+    content_root: &Path,
+    output_root: &Path,
+    backend: JsBackend,
+    timeout_secs: u64,
+    executor: &dyn ProcessPort,
 ) -> Result<()> {
     let rel = source
         .strip_prefix(content_root)
@@ -34,23 +46,16 @@ pub(crate) fn process_script_asset(
                 .with_context(|| format!("failed to copy script {} -> {}", source.display(), target.display()))?;
         }
         JsBackend::Esbuild => {
-            crate::ensure_binary_name_safe("esbuild")?;
-            let mut cmd = Command::new("esbuild");
-            let mut child = cmd
-                .arg(source)
-                .arg("--bundle")
-                .arg("--minify")
-                .arg("--outfile")
-                .arg(&target)
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .with_context(|| format!("failed to execute esbuild for {}", source.display()))?;
-            let status = wait_child_with_timeout(&mut child, timeout_secs)
-                .with_context(|| format!("esbuild timeout for {}", source.display()))?;
-            if !status.success() {
-                bail!("esbuild failed for {}", source.display());
-            }
+            let args = vec![
+                source.to_string_lossy().to_string(),
+                "--bundle".to_string(),
+                "--minify".to_string(),
+                "--outfile".to_string(),
+                target.to_string_lossy().to_string(),
+            ];
+            executor
+                .run("esbuild", &args, timeout_secs)
+                .with_context(|| format!("esbuild failed for {}", source.display()))?;
         }
     }
     Ok(())
@@ -64,29 +69,30 @@ pub(crate) fn run_tailwind(config: &TailwindConfig, content_dir: &Path, timeout_
 }
 
 pub(crate) fn run_tailwind_standalone(config: &TailwindConfig, timeout_secs: u64) -> Result<()> {
-    crate::ensure_binary_name_safe(&config.binary)?;
+    run_tailwind_standalone_with_executor(config, timeout_secs, &StdProcessPort)
+}
+
+pub(crate) fn run_tailwind_standalone_with_executor(
+    config: &TailwindConfig,
+    timeout_secs: u64,
+    executor: &dyn ProcessPort,
+) -> Result<()> {
     if let Some(parent) = config.output_css.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
     }
-    let mut cmd = Command::new(&config.binary);
-    cmd.arg("-i")
-        .arg(&config.input_css)
-        .arg("-o")
-        .arg(&config.output_css);
+    let mut args = vec![
+        "-i".to_string(),
+        config.input_css.to_string_lossy().to_string(),
+        "-o".to_string(),
+        config.output_css.to_string_lossy().to_string(),
+    ];
     if config.minify {
-        cmd.arg("--minify");
+        args.push("--minify".to_string());
     }
-    let mut child = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to execute {}", config.binary))?;
-    let status = wait_child_with_timeout(&mut child, timeout_secs)
-        .with_context(|| format!("{} timed out", config.binary))?;
-    if !status.success() {
-        bail!("tailwind standalone compile failed");
-    }
+    executor
+        .run(&config.binary, &args, timeout_secs)
+        .with_context(|| format!("{} compile failed", config.binary))?;
     Ok(())
 }
 
