@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nanoss_core::{
-    build_site, BuildConfig, BuildScope, I18nConfig, ImageBuildConfig, JsBackend, RemoteDataSourceConfig,
+    build_site, BuildConfig, BuildScope, I18nConfig, ImageBuildConfig, JsBackend, ProjectConfig,
     TailwindBackend, TailwindConfig,
 };
 use notify::{RecursiveMode, Watcher};
@@ -199,72 +199,6 @@ enum DeployTargetArg {
 enum CiProviderArg {
     Github,
     Gitlab,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectConfig {
-    #[serde(default)]
-    plugins: ProjectPluginsConfig,
-    #[serde(default)]
-    theme: ProjectThemeConfig,
-    #[serde(default)]
-    build: ProjectBuildConfig,
-    #[serde(default)]
-    server: ProjectServerConfig,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectPluginsConfig {
-    enabled: BTreeSet<String>,
-    #[serde(default)]
-    config: Option<toml::Value>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectThemeConfig {
-    name: Option<String>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectBuildConfig {
-    base_path: Option<String>,
-    site_domain: Option<String>,
-    #[serde(default)]
-    images: ProjectBuildImagesConfig,
-    #[serde(default)]
-    data_sources: BTreeMap<String, RemoteDataSourceConfig>,
-    #[serde(default)]
-    i18n: ProjectI18nConfig,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectBuildImagesConfig {
-    #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    generate_webp: bool,
-    #[serde(default)]
-    generate_avif: bool,
-    #[serde(default)]
-    widths: Vec<u32>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectI18nConfig {
-    #[serde(default)]
-    locales: Vec<String>,
-    default_locale: Option<String>,
-    #[serde(default)]
-    prefix_default_locale: bool,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct ProjectServerConfig {
-    mount_path: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
