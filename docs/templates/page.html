@@ -4,6 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title }} | Nanoss Docs</title>
+    {% for alt in alternates %}
+    <link rel="alternate" hreflang="{{ alt.locale }}" href="{{ alt.url }}" />
+    {% endfor %}
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -667,6 +670,19 @@
 
       <main class="content">
         {{ content | safe }}
+        {% if images.list|length > 0 %}
+        <section>
+          <h2>Responsive image helper</h2>
+          {% set first = images.list[0] %}
+          {% if first.variants|length > 0 %}
+          <img
+            src="{{ first.source }}"
+            srcset="{% for v in first.variants %}{{ v.webp }} {{ v.width }}w{% if not loop.last %}, {% endif %}{% endfor %}"
+            sizes="(max-width: 1024px) 100vw, 960px"
+            alt="docs responsive image demo" />
+          {% endif %}
+        </section>
+        {% endif %}
       </main>
     </div>
 

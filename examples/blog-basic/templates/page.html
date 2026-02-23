@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ title }}</title>
+  {% for alt in alternates %}
+  <link rel="alternate" hreflang="{{ alt.locale }}" href="{{ alt.url }}" />
+  {% endfor %}
   <link rel="stylesheet" href="/styles/site.css" />
 </head>
 <body>
@@ -17,6 +20,19 @@
     </nav>
     {% endif %}
     {{ content | safe }}
+    {% if images.list|length > 0 %}
+    <section>
+      <h2>Image srcset helper</h2>
+      {% set first = images.list[0] %}
+      {% if first.variants|length > 0 %}
+      <img
+        src="{{ first.source }}"
+        srcset="{% for v in first.variants %}{{ v.webp }} {{ v.width }}w{% if not loop.last %}, {% endif %}{% endfor %}"
+        sizes="(max-width: 768px) 100vw, 720px"
+        alt="responsive demo" />
+      {% endif %}
+    </section>
+    {% endif %}
   </main>
   <script src="/scripts/site.js"></script>
 </body>
