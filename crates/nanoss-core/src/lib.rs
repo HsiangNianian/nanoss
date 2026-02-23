@@ -5,9 +5,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use lightningcss::stylesheet::{ParserFlags, ParserOptions, PrinterOptions, StyleSheet};
+use image::codecs::avif::AvifEncoder;
+use image::codecs::webp::WebPEncoder;
+use image::imageops::FilterType;
+use image::{ColorType, GenericImageView, ImageEncoder};
 use minijinja::{context, Environment};
 use nanoss_plugin_host::{PluginHost, PluginHostConfig};
 use nanoss_query::{combine_fingerprints, content_hash, QueryDb, SourceFile};
@@ -30,6 +35,9 @@ const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ title }}</title>
+  {% for alt in alternates %}
+  <link rel="alternate" hreflang="{{ alt.locale }}" href="{{ alt.url }}" />
+  {% endfor %}
 </head>
 <body>
   <main>
@@ -39,6 +47,16 @@ const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
     </nav>
     {% endif %}
     {{ content | safe }}
+    {% if images.list|length > 0 %}
+    <section>
+      <h2>Image helpers</h2>
+      <ul>
+        {% for img in images.list %}
+        <li><code>{{ img.source }}</code></li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
   </main>
 </body>
 </html>
@@ -61,7 +79,7 @@ static MD_LINK_RE: Lazy<Regex> = Lazy::new(|| {
 static HTML_ASSET_ATTR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?:src|href)=["']([^"']+)["']"#).expect("valid html attr regex"));
 const BUILD_CACHE_FILE: &str = ".nanoss-cache.json";
-const BUILD_CACHE_SCHEMA_VERSION: u32 = 2;
+const BUILD_CACHE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -85,6 +103,10 @@ pub struct BuildConfig {
     pub command_timeout_secs: u64,
     pub base_path: String,
     pub site_domain: Option<String>,
+    pub images: ImageBuildConfig,
+    pub remote_data_sources: BTreeMap<String, RemoteDataSourceConfig>,
+    pub i18n: I18nConfig,
+    pub build_scope: BuildScope,
 }
 
 #[derive(Debug, Default)]
@@ -99,6 +121,64 @@ pub struct BuildReport {
     pub compiled_tailwind: bool,
     pub island_pages: usize,
     pub ai_indexed_pages: usize,
+    pub processed_images: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum BuildScope {
+    #[default]
+    Full,
+    SinglePage { path: PathBuf },
+    AssetsOnly { paths: Vec<PathBuf> },
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageBuildConfig {
+    pub enabled: bool,
+    pub generate_webp: bool,
+    pub generate_avif: bool,
+    pub widths: Vec<u32>,
+}
+
+impl Default for ImageBuildConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            generate_webp: false,
+            generate_avif: false,
+            widths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoteDataSourceConfig {
+    pub url: String,
+    #[serde(default = "default_remote_data_method")]
+    pub method: String,
+    #[serde(default)]
+    pub fail_fast: bool,
+}
+
+fn default_remote_data_method() -> String {
+    "GET".to_string()
+}
+
+#[derive(Debug, Clone)]
+pub struct I18nConfig {
+    pub locales: Vec<String>,
+    pub default_locale: Option<String>,
+    pub prefix_default_locale: bool,
+}
+
+impl Default for I18nConfig {
+    fn default() -> Self {
+        Self {
+            locales: Vec::new(),
+            default_locale: None,
+            prefix_default_locale: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,6 +210,7 @@ struct FrontMatter {
     date: Option<String>,
     tags: Option<Vec<String>>,
     categories: Option<Vec<String>>,
+    template: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -147,6 +228,8 @@ struct BuildCache {
     pages: HashMap<String, CachePageRecord>,
     #[serde(default)]
     assets: HashMap<String, CacheAssetRecord>,
+    #[serde(default)]
+    images: HashMap<String, CacheImageRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,12 +244,29 @@ struct CacheAssetRecord {
     output: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheImageRecord {
+    hash: String,
+    output: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    variants: Vec<ImageVariantRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImageVariantRecord {
+    format: String,
+    width: Option<u32>,
+    output: String,
+}
+
 impl Default for BuildCache {
     fn default() -> Self {
         Self {
             schema_version: BUILD_CACHE_SCHEMA_VERSION,
             pages: HashMap::new(),
             assets: HashMap::new(),
+            images: HashMap::new(),
         }
     }
 }
@@ -192,6 +292,11 @@ struct ContentEntry {
 }
 
 pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
+    let build_started = Instant::now();
+    log_build_event("build_start", serde_json::json!({
+        "content_dir": config.content_dir.display().to_string(),
+        "output_dir": config.output_dir.display().to_string(),
+    }));
     validate_build_config(config)?;
     let base_path = normalize_base_path(&config.base_path);
     let site_domain = normalize_site_domain(config.site_domain.as_deref())?;
@@ -199,9 +304,11 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         .with_context(|| format!("failed to create output directory {}", config.output_dir.display()))?;
 
     let mut env = Environment::new();
-    let page_template = load_page_template(config.template_dir.as_deref(), config.theme_dir.as_deref())?;
-    env.add_template("page.html", &page_template)
-        .context("failed to register template")?;
+    let templates = load_templates(config.template_dir.as_deref(), config.theme_dir.as_deref())?;
+    for (name, source) in &templates {
+        env.add_template(name, source)
+            .with_context(|| format!("failed to register template {name}"))?;
+    }
 
     let mut plugin_host = PluginHost::new(PluginHostConfig {
         plugin_paths: config.plugin_paths.clone(),
@@ -212,7 +319,11 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 
     let mut report = BuildReport::default();
     let query_db = QueryDb::default();
-    let data_context = load_data_context(&config.content_dir)?;
+    let data_context = load_data_context(
+        &config.content_dir,
+        &config.output_dir,
+        &config.remote_data_sources,
+    )?;
     let cache_path = config.output_dir.join(BUILD_CACHE_FILE);
     let mut build_cache = load_build_cache(&cache_path)?;
     let template_hash = compute_template_dependency_hash(
@@ -276,8 +387,10 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                 let rendered = render_markdown_file(
                     entry.path(),
                     &env,
+                    &templates,
                     &mut plugin_host,
                     &data_context,
+                    config,
                     &base_path,
                 )?;
                 let target =
@@ -287,6 +400,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                         &config.output_dir,
                         rendered.slug.as_deref(),
                         rendered.lang.as_deref(),
+                        &config.i18n,
                     )?;
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)
@@ -310,6 +424,33 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     },
                 );
                 report.rendered_pages += 1;
+            }
+            Some(ext) if is_image_extension(ext) => {
+                let hash = hashed_file_content(entry.path());
+                let cache_key = entry.path().display().to_string();
+                let target = asset_output_path(entry.path(), &config.content_dir, &config.output_dir, None)?;
+                if let Some(record) = build_cache.assets.get(&cache_key) {
+                    if record.hash == hash && PathBuf::from(&record.output).exists() {
+                        report.copied_assets += 1;
+                        continue;
+                    }
+                }
+                let image_record = process_image_asset(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    &config.images,
+                )?;
+                build_cache.assets.insert(
+                    cache_key.clone(),
+                    CacheAssetRecord {
+                        hash: hash.clone(),
+                        output: target.display().to_string(),
+                    },
+                );
+                build_cache.images.insert(cache_key, image_record);
+                report.copied_assets += 1;
+                report.processed_images += 1;
             }
             Some("scss") | Some("sass") => {
                 let hash = hashed_file_content(entry.path());
@@ -423,14 +564,32 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         report.ai_indexed_pages = build_semantic_index(&config.content_dir, &config.output_dir)?;
     }
 
-    let entries = collect_content_entries(&config.content_dir, &config.output_dir, &base_path)?;
+    let entries = collect_content_entries(
+        &config.content_dir,
+        &config.output_dir,
+        &base_path,
+        &config.i18n,
+    )?;
     generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
     generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
 
     plugin_host.shutdown()?;
     save_build_cache(&cache_path, &build_cache)?;
+    log_build_event("build_finish", serde_json::json!({
+        "duration_ms": build_started.elapsed().as_millis(),
+        "rendered_pages": report.rendered_pages,
+        "processed_images": report.processed_images,
+        "copied_assets": report.copied_assets,
+    }));
 
     Ok(report)
+}
+
+fn log_build_event(stage: &str, payload: serde_json::Value) {
+    let mut obj = serde_json::Map::new();
+    obj.insert("stage".to_string(), serde_json::Value::String(stage.to_string()));
+    obj.insert("payload".to_string(), payload);
+    println!("{}", serde_json::Value::Object(obj));
 }
 
 struct RenderedPage {
@@ -449,8 +608,10 @@ struct TocItem {
 fn render_markdown_file(
     path: &Path,
     env: &Environment<'_>,
+    templates: &HashMap<String, String>,
     plugin_host: &mut PluginHost,
     data_context: &serde_json::Value,
+    config: &BuildConfig,
     base_path: &str,
 ) -> Result<RenderedPage> {
     let raw = fs::read_to_string(path)
@@ -462,9 +623,11 @@ fn render_markdown_file(
         format!("failed to parse frontmatter for {}", path.display())
     })?;
 
-    let (html_content, toc_items) = markdown_to_html(markdown);
+    let expanded_markdown = expand_component_shortcodes(markdown);
+    let (html_content, toc_items) = markdown_to_html(&expanded_markdown);
     let title = frontmatter
         .title
+        .clone()
         .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
         .unwrap_or_else(|| "Untitled".to_string());
     let ir = PageIr {
@@ -479,13 +642,21 @@ fn render_markdown_file(
     let transformed_ir: PageIr =
         serde_json::from_str(&transformed_ir_json).context("plugin returned invalid page ir json")?;
 
-    let tmpl = env.get_template("page.html").context("missing page.html template")?;
+    let template_name = resolve_template_name(path, &frontmatter, templates);
+    let tmpl = env
+        .get_template(&template_name)
+        .with_context(|| format!("missing template {}", template_name))?;
+    let image_helpers = build_page_image_helpers(path, markdown, config, base_path)?;
+    let alternates = build_i18n_alternates(path, &frontmatter, config, base_path)?;
     let rendered_html = tmpl
         .render(context! {
             title => transformed_ir.title,
             content => transformed_ir.content_html,
             toc => transformed_ir.toc_html,
             data => data_context,
+            images => image_helpers,
+            alternates => alternates,
+            locale => frontmatter.lang.clone().or_else(|| config.i18n.default_locale.clone()).unwrap_or_else(|| "und".to_string()),
             base_path => base_path,
             base_href_prefix => base_href_prefix(base_path)
         })
@@ -502,22 +673,51 @@ fn render_markdown_file(
     })
 }
 
-fn load_page_template(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<String> {
-    if let Some(dir) = template_dir {
-        let candidate = dir.join("page.html");
-        if candidate.exists() {
-            return fs::read_to_string(&candidate)
-                .with_context(|| format!("failed to read template {}", candidate.display()));
-        }
-    }
+fn load_templates(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<HashMap<String, String>> {
+    let mut templates = HashMap::new();
+    templates.insert("page.html".to_string(), DEFAULT_PAGE_TEMPLATE.to_string());
+
     if let Some(theme) = theme_dir {
-        let candidate = theme.join("templates").join("page.html");
-        if candidate.exists() {
-            return fs::read_to_string(&candidate)
-                .with_context(|| format!("failed to read theme template {}", candidate.display()));
+        let root = theme.join("templates");
+        if root.exists() {
+            collect_templates_from_dir(&root, &mut templates)?;
         }
     }
-    Ok(DEFAULT_PAGE_TEMPLATE.to_string())
+    if let Some(site) = template_dir {
+        if site.exists() {
+            collect_templates_from_dir(site, &mut templates)?;
+        }
+    }
+    Ok(templates)
+}
+
+fn collect_templates_from_dir(root: &Path, templates: &mut HashMap<String, String>) -> Result<()> {
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.path().extension().and_then(OsStr::to_str) != Some("html") {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .with_context(|| format!("failed to relativize template {}", entry.path().display()))?;
+        let key = rel.to_string_lossy().replace('\\', "/");
+        let source = fs::read_to_string(entry.path())
+            .with_context(|| format!("failed to read template {}", entry.path().display()))?;
+        templates.insert(key, source);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn load_page_template(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<String> {
+    let templates = load_templates(template_dir, theme_dir)?;
+    Ok(templates
+        .get("page.html")
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_PAGE_TEMPLATE.to_string()))
 }
 
 fn copy_theme_static_assets(theme_dir: Option<&Path>, output_dir: &Path) -> Result<()> {
@@ -669,19 +869,150 @@ fn markdown_to_html(markdown: &str) -> (String, Vec<TocItem>) {
     (out, toc)
 }
 
+fn expand_component_shortcodes(markdown: &str) -> String {
+    static COMPONENT_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"\{\{<\s*([A-Za-z0-9_-]+)([^>]*)>\}\}"#).expect("valid component shortcode regex")
+    });
+    static ATTR_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r#"([A-Za-z0-9_-]+)\s*=\s*"([^"]*)""#).expect("valid shortcode attr regex")
+    });
+    COMPONENT_RE
+        .replace_all(markdown, |caps: &regex::Captures<'_>| {
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or("component");
+            let attrs = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            let mut values = BTreeMap::<String, String>::new();
+            for attr in ATTR_RE.captures_iter(attrs) {
+                let key = attr.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+                let value = attr.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+                if !key.is_empty() {
+                    values.insert(key, value);
+                }
+            }
+            let mode = values.get("mode").map(String::as_str).unwrap_or("static");
+            if mode == "island" {
+                let mut props = serde_json::Map::new();
+                for (k, v) in values {
+                    if k != "mode" {
+                        props.insert(k, serde_json::Value::String(v));
+                    }
+                }
+                let props_json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+                return format!(
+                    "<island name=\"component-{}\" props='{}'></island>",
+                    sanitize_language_token(name),
+                    escape_html(&props_json)
+                );
+            }
+            let text = values
+                .get("text")
+                .cloned()
+                .unwrap_or_else(|| format!("component: {}", name));
+            format!(
+                "<div class=\"nanoss-component nanoss-component-{}\">{}</div>",
+                sanitize_language_token(name),
+                escape_html(&text)
+            )
+        })
+        .into_owned()
+}
+
+fn resolve_template_name(path: &Path, frontmatter: &FrontMatter, templates: &HashMap<String, String>) -> String {
+    if let Some(template) = frontmatter.template.as_deref() {
+        if templates.contains_key(template) {
+            return template.to_string();
+        }
+    }
+    if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(OsStr::to_str) {
+        let scoped = format!("{parent}.html");
+        if templates.contains_key(&scoped) {
+            return scoped;
+        }
+    }
+    "page.html".to_string()
+}
+
+fn build_page_image_helpers(
+    page_path: &Path,
+    markdown_raw: &str,
+    config: &BuildConfig,
+    base_path: &str,
+) -> Result<serde_json::Value> {
+    let deps = discover_page_asset_dependencies(page_path, markdown_raw);
+    let mut items = Vec::new();
+    for dep in deps {
+        if !dep.starts_with(&config.content_dir) {
+            continue;
+        }
+        let rel = dep
+            .strip_prefix(&config.content_dir)
+            .with_context(|| format!("failed to relativize image dependency {}", dep.display()))?;
+        let rel_url = format!("/{}", rel.to_string_lossy().replace('\\', "/"));
+        let mut variants = Vec::new();
+        for width in &config.images.widths {
+            variants.push(serde_json::json!({
+                "width": width,
+                "webp": with_base_path(&format!("{}-w{}.webp", rel_url.trim_end_matches(".png").trim_end_matches(".jpg").trim_end_matches(".jpeg"), width), base_path),
+                "avif": with_base_path(&format!("{}-w{}.avif", rel_url.trim_end_matches(".png").trim_end_matches(".jpg").trim_end_matches(".jpeg"), width), base_path)
+            }));
+        }
+        items.push(serde_json::json!({
+            "source": with_base_path(&rel_url, base_path),
+            "variants": variants
+        }));
+    }
+    Ok(serde_json::json!({ "list": items }))
+}
+
+fn build_i18n_alternates(
+    path: &Path,
+    frontmatter: &FrontMatter,
+    config: &BuildConfig,
+    base_path: &str,
+) -> Result<Vec<serde_json::Value>> {
+    if config.i18n.locales.is_empty() {
+        return Ok(Vec::new());
+    }
+    let slug = frontmatter
+        .slug
+        .clone()
+        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+        .unwrap_or_else(|| "index".to_string());
+    let mut alternates = Vec::new();
+    for locale in &config.i18n.locales {
+        let locale_prefix = locale_prefix_for_output(Some(locale), &config.i18n)?;
+        let route = if slug == "index" {
+            match locale_prefix {
+                Some(prefix) => format!("/{prefix}/"),
+                None => "/".to_string(),
+            }
+        } else {
+            match locale_prefix {
+                Some(prefix) => format!("/{prefix}/{slug}/"),
+                None => format!("/{slug}/"),
+            }
+        };
+        alternates.push(serde_json::json!({
+            "locale": locale,
+            "url": with_base_path(&route, base_path),
+        }));
+    }
+    Ok(alternates)
+}
+
 fn output_path_for(
     source: &Path,
     content_root: &Path,
     output_root: &Path,
     slug: Option<&str>,
     lang: Option<&str>,
+    i18n: &I18nConfig,
 ) -> Result<PathBuf> {
+    let locale_segment = locale_prefix_for_output(lang, i18n)?;
     if let Some(slug) = slug {
         validate_route_segment(slug, "slug")?;
         let mut base = output_root.to_path_buf();
-        if let Some(lang) = lang {
-            validate_route_segment(lang, "lang")?;
-            base = base.join(lang);
+        if let Some(locale) = locale_segment.as_deref() {
+            base = base.join(locale);
         }
         let candidate = if slug == "index" {
             base.join("index.html")
@@ -696,14 +1027,27 @@ fn output_path_for(
         .strip_prefix(content_root)
         .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
     let mut target = output_root.to_path_buf();
-    if let Some(lang) = lang {
-        validate_route_segment(lang, "lang")?;
-        target = target.join(lang);
+    if let Some(locale) = locale_segment.as_deref() {
+        target = target.join(locale);
     }
     target = target.join(rel);
     target.set_extension("html");
     ensure_inside_output(output_root, &target)?;
     Ok(target)
+}
+
+fn locale_prefix_for_output(lang: Option<&str>, i18n: &I18nConfig) -> Result<Option<String>> {
+    let Some(locale) = lang.or(i18n.default_locale.as_deref()) else {
+        return Ok(None);
+    };
+    validate_route_segment(locale, "locale")?;
+    if !i18n.locales.is_empty() && !i18n.locales.iter().any(|candidate| candidate == locale) {
+        bail!("locale '{}' is not in configured locales", locale);
+    }
+    if i18n.default_locale.as_deref() == Some(locale) && !i18n.prefix_default_locale {
+        return Ok(None);
+    }
+    Ok(Some(locale.to_string()))
 }
 
 fn compile_sass_file(source: &Path, content_root: &Path, output_root: &Path, _timeout_secs: u64) -> Result<()> {
@@ -754,6 +1098,126 @@ fn copy_asset_file(source: &Path, content_root: &Path, output_root: &Path) -> Re
     fs::copy(source, &target)
         .with_context(|| format!("failed to copy asset {} -> {}", source.display(), target.display()))?;
     Ok(())
+}
+
+fn process_image_asset(
+    source: &Path,
+    content_root: &Path,
+    output_root: &Path,
+    image_config: &ImageBuildConfig,
+) -> Result<CacheImageRecord> {
+    let rel = source
+        .strip_prefix(content_root)
+        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
+    let target = output_root.join(rel);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
+    }
+    fs::copy(source, &target)
+        .with_context(|| format!("failed to copy image {} -> {}", source.display(), target.display()))?;
+
+    let mut record = CacheImageRecord {
+        hash: hashed_file_content(source),
+        output: target.display().to_string(),
+        width: None,
+        height: None,
+        variants: Vec::new(),
+    };
+    if !image_config.enabled {
+        return Ok(record);
+    }
+
+    let image = match image::open(source) {
+        Ok(image) => image,
+        Err(_) => return Ok(record),
+    };
+    let (width, height) = image.dimensions();
+    record.width = Some(width);
+    record.height = Some(height);
+
+    let mut formats = vec!["original".to_string()];
+    if image_config.generate_webp {
+        formats.push("webp".to_string());
+    }
+    if image_config.generate_avif {
+        formats.push("avif".to_string());
+    }
+    let mut widths = image_config.widths.clone();
+    widths.sort_unstable();
+    widths.dedup();
+
+    for format in formats {
+        for width_hint in widths.iter().copied().chain(std::iter::once(width)) {
+            if width_hint == 0 || width_hint > width {
+                continue;
+            }
+            if format == "original" && width_hint == width {
+                continue;
+            }
+            let variant = if width_hint == width {
+                image.clone()
+            } else {
+                let ratio = width_hint as f32 / width as f32;
+                let height_hint = ((height as f32) * ratio).round().max(1.0) as u32;
+                image.resize_exact(width_hint, height_hint, FilterType::Lanczos3)
+            };
+            if let Some(variant_output) = write_image_variant(&target, &variant, &format, width_hint)? {
+                record.variants.push(ImageVariantRecord {
+                    format: format.clone(),
+                    width: Some(width_hint),
+                    output: variant_output.display().to_string(),
+                });
+            }
+        }
+    }
+    Ok(record)
+}
+
+fn write_image_variant(target: &Path, image: &image::DynamicImage, format: &str, width: u32) -> Result<Option<PathBuf>> {
+    let stem = target.file_stem().and_then(OsStr::to_str).unwrap_or("image");
+    let suffix = if format == "original" {
+        target
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| ext.to_string())
+            .unwrap_or_else(|| "img".to_string())
+    } else {
+        format.to_string()
+    };
+    let file_name = format!("{stem}-w{width}.{suffix}");
+    let output = target.with_file_name(file_name);
+    let mut bytes = Vec::new();
+    match format {
+        "webp" => {
+            let rgba = image.to_rgba8();
+            WebPEncoder::new_lossless(&mut bytes)
+                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+                .context("failed to encode webp variant")?;
+        }
+        "avif" => {
+            let rgba = image.to_rgba8();
+            AvifEncoder::new(&mut bytes)
+                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+                .context("failed to encode avif variant")?;
+        }
+        "original" => {
+            image
+                .save(&output)
+                .with_context(|| format!("failed to write resized variant {}", output.display()))?;
+            return Ok(Some(output));
+        }
+        _ => return Ok(None),
+    }
+    fs::write(&output, bytes).with_context(|| format!("failed to write image variant {}", output.display()))?;
+    Ok(Some(output))
+}
+
+fn is_image_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "tiff"
+    )
 }
 
 fn process_script_asset(
@@ -1432,44 +1896,110 @@ fn request_status(client: &Client, method: Method, url: &str) -> Option<u16> {
         .map(|response| response.status().as_u16())
 }
 
-fn load_data_context(content_dir: &Path) -> Result<serde_json::Value> {
+fn load_data_context(
+    content_dir: &Path,
+    output_dir: &Path,
+    remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
+) -> Result<serde_json::Value> {
     let data_dir = content_dir.join("data");
-    if !data_dir.exists() {
-        return Ok(serde_json::Value::Object(serde_json::Map::new()));
-    }
     let mut root = serde_json::Map::new();
-    for entry in WalkDir::new(&data_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(&data_dir)
-            .with_context(|| format!("failed to relativize data file {}", entry.path().display()))?;
-        let key = rel
-            .with_extension("")
-            .to_string_lossy()
-            .replace(['/', '\\'], ".");
-        let raw = fs::read_to_string(entry.path())
-            .with_context(|| format!("failed to read data file {}", entry.path().display()))?;
-        let value = match entry.path().extension().and_then(OsStr::to_str) {
-            Some("json") => serde_json::from_str(&raw)
-                .with_context(|| format!("failed to parse json data {}", entry.path().display()))?,
-            Some("yaml") | Some("yml") => serde_yaml::from_str::<serde_json::Value>(&raw)
-                .with_context(|| format!("failed to parse yaml data {}", entry.path().display()))?,
-            Some("toml") => {
-                let toml_value: toml::Value =
-                    toml::from_str(&raw).with_context(|| format!("failed to parse toml data {}", entry.path().display()))?;
-                serde_json::to_value(toml_value).context("failed to convert toml data to json value")?
+    if data_dir.exists() {
+        for entry in WalkDir::new(&data_dir).into_iter().filter_map(Result::ok) {
+            if !entry.file_type().is_file() {
+                continue;
             }
-            _ => continue,
-        };
+            let rel = entry
+                .path()
+                .strip_prefix(&data_dir)
+                .with_context(|| format!("failed to relativize data file {}", entry.path().display()))?;
+            let key = rel
+                .with_extension("")
+                .to_string_lossy()
+                .replace(['/', '\\'], ".");
+            let raw = fs::read_to_string(entry.path())
+                .with_context(|| format!("failed to read data file {}", entry.path().display()))?;
+            let value = match entry.path().extension().and_then(OsStr::to_str) {
+                Some("json") => serde_json::from_str(&raw)
+                    .with_context(|| format!("failed to parse json data {}", entry.path().display()))?,
+                Some("yaml") | Some("yml") => serde_yaml::from_str::<serde_json::Value>(&raw)
+                    .with_context(|| format!("failed to parse yaml data {}", entry.path().display()))?,
+                Some("toml") => {
+                    let toml_value: toml::Value = toml::from_str(&raw)
+                        .with_context(|| format!("failed to parse toml data {}", entry.path().display()))?;
+                    serde_json::to_value(toml_value).context("failed to convert toml data to json value")?
+                }
+                _ => continue,
+            };
+            root.insert(key, value);
+        }
+    }
+    let remote = fetch_remote_data_sources(output_dir, remote_sources)?;
+    for (key, value) in remote {
         root.insert(key, value);
     }
     Ok(serde_json::Value::Object(root))
 }
 
-fn collect_content_entries(content_dir: &Path, output_dir: &Path, base_path: &str) -> Result<Vec<ContentEntry>> {
+fn fetch_remote_data_sources(
+    output_dir: &Path,
+    remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    if remote_sources.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let cache_dir = output_dir.join(".nanoss-cache").join("remote-data");
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("failed to create remote data cache dir {}", cache_dir.display()))?;
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("nanoss-remote-data/0.1")
+        .build()
+        .context("failed to build remote data client")?;
+
+    let mut resolved = BTreeMap::new();
+    for (key, source) in remote_sources {
+        let cache_file = cache_dir.join(format!("{key}.json"));
+        let method = source.method.to_uppercase();
+        let mut loaded = None;
+        if method == "GET" {
+            if let Ok(resp) = client.get(&source.url).send() {
+                if let Ok(ok_resp) = resp.error_for_status() {
+                    let value = serde_json::from_str::<serde_json::Value>(
+                        &ok_resp
+                            .text()
+                            .with_context(|| format!("failed to read remote payload for source '{}'", key))?,
+                    )
+                    .with_context(|| format!("failed to decode remote json for source '{}'", key))?;
+                    fs::write(&cache_file, serde_json::to_vec_pretty(&value)?)
+                        .with_context(|| format!("failed to persist remote data cache {}", cache_file.display()))?;
+                    loaded = Some(value);
+                }
+            }
+        }
+        if loaded.is_none() && cache_file.exists() {
+            let cached = fs::read_to_string(&cache_file)
+                .with_context(|| format!("failed to read cached remote data {}", cache_file.display()))?;
+            loaded = Some(
+                serde_json::from_str(&cached)
+                    .with_context(|| format!("failed to parse cached remote data {}", cache_file.display()))?,
+            );
+        }
+        if let Some(value) = loaded {
+            resolved.insert(key.clone(), value);
+        } else if source.fail_fast {
+            bail!("remote data source '{}' failed and no cache is available", key);
+        }
+    }
+    Ok(resolved)
+}
+
+fn collect_content_entries(
+    content_dir: &Path,
+    output_dir: &Path,
+    base_path: &str,
+    i18n: &I18nConfig,
+) -> Result<Vec<ContentEntry>> {
     let mut entries = Vec::new();
     for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() || entry.path().extension().and_then(OsStr::to_str) != Some("md") {
@@ -1485,6 +2015,7 @@ fn collect_content_entries(content_dir: &Path, output_dir: &Path, base_path: &st
             output_dir,
             fm.slug.as_deref(),
             fm.lang.as_deref(),
+            i18n,
         )?;
         let rel = output
             .strip_prefix(output_dir)
@@ -1521,6 +2052,9 @@ fn render_organization_page(
             content => body_html,
             toc => "",
             data => data_context,
+            images => serde_json::json!({"list": []}),
+            alternates => Vec::<serde_json::Value>::new(),
+            locale => "und",
             base_path => base_path,
             base_href_prefix => base_href_prefix(base_path)
         })
@@ -1651,6 +2185,17 @@ fn validate_build_config(config: &BuildConfig) -> Result<()> {
     }
     if !config.base_path.starts_with('/') {
         bail!("base_path must start with '/'");
+    }
+    for width in &config.images.widths {
+        if *width == 0 {
+            bail!("image width variants must be > 0");
+        }
+    }
+    if let Some(default_locale) = config.i18n.default_locale.as_deref() {
+        validate_route_segment(default_locale, "default_locale")?;
+    }
+    for locale in &config.i18n.locales {
+        validate_route_segment(locale, "locale")?;
     }
     Ok(())
 }
@@ -1946,6 +2491,9 @@ mod tests {
             command_timeout_secs: 120,
             base_path: "/".to_string(),
             site_domain: None,
+            images: ImageBuildConfig::default(),
+            remote_data_sources: BTreeMap::new(),
+            i18n: I18nConfig::default(),
         };
 
         build_site(&config)?;
@@ -2018,7 +2566,7 @@ mod tests {
         fs::write(dir.path().join("data/site.json"), r#"{"name":"nanoss"}"#).context("write json")?;
         fs::write(dir.path().join("data/theme.yaml"), "kind: blog").context("write yaml")?;
         fs::write(dir.path().join("data/build.toml"), "mode = 'fast'").context("write toml")?;
-        let data = load_data_context(dir.path())?;
+        let data = load_data_context(dir.path(), dir.path(), &BTreeMap::new())?;
         let obj = data.as_object().context("expected object data")?;
         assert!(obj.contains_key("site"));
         assert!(obj.contains_key("theme"));
