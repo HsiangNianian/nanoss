@@ -2087,6 +2087,7 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -2143,6 +2144,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nanoss-plugin-api",
+ "tracing",
  "wasmtime",
 ]
 
