@@ -55,6 +55,49 @@
   - Island nodes are emitted as `<div data-island="..." data-props='...'></div>` and hydrated by registered handlers.
 - Semantic index at `public/search/semantic-index.json` when enabled.
 
+## Current dependency map
+
+```mermaid
+flowchart LR
+  cli[nanoss-cli] --> core[nanoss-core]
+  core --> query[nanoss-query]
+  core --> host[nanoss-plugin-host]
+  host --> api[nanoss-plugin-api]
+```
+
+## Current runtime call sequence
+
+```mermaid
+sequenceDiagram
+  participant user as CLI
+  participant core as BuildCore
+  participant plugin as PluginHost
+  participant io as FS/Process/HTTP
+  user->>core: run_build_with_scope()
+  core->>plugin: init(config-json)
+  core->>io: scan/read content
+  core->>plugin: transform_markdown()
+  core->>plugin: on_page_ir()
+  core->>plugin: on_post_render()
+  core->>io: write page/assets/cache
+  core->>plugin: shutdown()
+```
+
+## Target decoupled architecture
+
+```mermaid
+flowchart LR
+  cli[nanoss-cli] --> app[BuildApplication]
+  app --> ports[Ports]
+  ports --> fs[FileSystemPort]
+  ports --> http[HttpPort]
+  ports --> proc[ProcessPort]
+  app --> boundary[PluginBoundary]
+  boundary --> host[PluginHost]
+  host --> wit[PluginWIT]
+  app --> query[nanoss-query]
+```
+
 ## Islands Minimal Example
 
 Write a island node in markdown：
