@@ -1,9 +1,8 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use rswind::create_processor;
 use walkdir::WalkDir;
 
