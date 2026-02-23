@@ -3,5 +3,21 @@ base_path = "/nanoss"
 # Optional: used for absolute sitemap/feed links.
 site_domain = "https://hsiangnianian.github.io"
 
+[build.images]
+enabled = true
+generate_webp = true
+generate_avif = false
+widths = [480, 768, 1200]
+
+[build.i18n]
+locales = ["en", "zh"]
+default_locale = "en"
+prefix_default_locale = false
+
+[build.data_sources.demo]
+url = "https://jsonplaceholder.typicode.com/todos/1"
+method = "GET"
+fail_fast = false
+
 [server]
 mount_path = "/nanoss"
