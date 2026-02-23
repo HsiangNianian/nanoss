@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use nanoss_core::{build_site, BuildConfig, JsBackend, TailwindBackend, TailwindConfig};
+use nanoss_core::{
+    build_site, BuildConfig, I18nConfig, ImageBuildConfig, JsBackend, RemoteDataSourceConfig,
+    TailwindBackend, TailwindConfig,
+};
 use notify::{RecursiveMode, Watcher};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -226,6 +229,37 @@ struct ProjectThemeConfig {
 struct ProjectBuildConfig {
     base_path: Option<String>,
     site_domain: Option<String>,
+    #[serde(default)]
+    images: ProjectBuildImagesConfig,
+    #[serde(default)]
+    data_sources: BTreeMap<String, RemoteDataSourceConfig>,
+    #[serde(default)]
+    i18n: ProjectI18nConfig,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProjectBuildImagesConfig {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    generate_webp: bool,
+    #[serde(default)]
+    generate_avif: bool,
+    #[serde(default)]
+    widths: Vec<u32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProjectI18nConfig {
+    #[serde(default)]
+    locales: Vec<String>,
+    default_locale: Option<String>,
+    #[serde(default)]
+    prefix_default_locale: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -412,15 +446,28 @@ fn run_build(args: &BuildArgs) -> Result<()> {
         command_timeout_secs: 120,
         base_path,
         site_domain,
+        images: ImageBuildConfig {
+            enabled: config.build.images.enabled,
+            generate_webp: config.build.images.generate_webp,
+            generate_avif: config.build.images.generate_avif,
+            widths: config.build.images.widths.clone(),
+        },
+        remote_data_sources: config.build.data_sources.clone(),
+        i18n: I18nConfig {
+            locales: config.build.i18n.locales.clone(),
+            default_locale: config.build.i18n.default_locale.clone(),
+            prefix_default_locale: config.build.i18n.prefix_default_locale,
+        },
     })?;
     println!(
-        "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
+        "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, processed {} images, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
         report.rendered_pages,
         report.skipped_pages,
         report.island_pages,
         report.compiled_sass,
         report.copied_assets,
         report.processed_scripts,
+        report.processed_images,
         report.compiled_tailwind,
         report.ai_indexed_pages,
         report.checked_external_links,
@@ -456,6 +503,20 @@ fn run_server(args: ServerArgs) -> Result<()> {
         let request = server.recv().context("server failed to receive request")?;
         handle_static_request(request, &args.build.output_dir, &mount_path)?;
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RebuildScope {
+    Full,
+    SinglePage,
+    AssetsOnly,
+    Template,
+    Mixed,
+}
+
+fn run_build_scoped(args: &BuildArgs, scope: RebuildScope) -> Result<()> {
+    println!("{{\"stage\":\"rebuild_scope\",\"scope\":\"{:?}\"}}", scope);
+    run_build(args)
 }
 
 fn run_deploy(args: DeployArgs) -> Result<()> {
@@ -630,7 +691,7 @@ fn create_site_scaffold(root: &Path, force: bool) -> Result<()> {
     fs::create_dir_all(root).with_context(|| format!("failed to create {}", root.display()))?;
     create_if_missing(
         &root.join(PROJECT_CONFIG_FILE),
-        "[build]\nbase_path = \"/\"\n# site_domain = \"https://example.com\"\n\n[server]\n# mount_path = \"/nanoss\"\n",
+        "[build]\nbase_path = \"/\"\n# site_domain = \"https://example.com\"\n\n[build.images]\nenabled = true\ngenerate_webp = true\ngenerate_avif = false\nwidths = [480, 768, 1200]\n\n[build.i18n]\nlocales = [\"en\", \"zh\"]\ndefault_locale = \"en\"\nprefix_default_locale = false\n\n[server]\n# mount_path = \"/nanoss\"\n",
         force,
     )?;
     create_if_missing(
@@ -919,6 +980,18 @@ fn ensure_plugin_compatible(entry: &PluginRegistryEntry) -> Result<()> {
             HOST_VERSION
         );
     }
+    if min.major < host.major {
+        eprintln!(
+            "warning: plugin {} targets host major {} but current major is {} (legacy compatibility mode)",
+            entry.id, min.major, host.major
+        );
+    }
+    if min.minor + 2 < host.minor {
+        eprintln!(
+            "hint: plugin {} is older than two host minor versions; consider upgrading plugin for latest v2 payload support",
+            entry.id
+        );
+    }
     Ok(())
 }
 
@@ -1044,12 +1117,29 @@ fn spawn_watch_thread(build: BuildArgs) -> Result<()> {
         let _watcher_guard = watcher;
         loop {
             match event_rx.recv() {
-                Ok(Ok(_)) => {
+                Ok(Ok(event)) => {
                     thread::sleep(Duration::from_millis(100));
-                    if let Err(err) = run_build(&build) {
+                    let changed = event.paths;
+                    let change_kind = classify_watch_change(&build, &changed);
+                    println!(
+                        "{{\"stage\":\"watch_rebuild_start\",\"change_kind\":\"{}\",\"changed\":{}}}",
+                        change_kind,
+                        serde_json::to_string(&changed).unwrap_or_else(|_| "[]".to_string())
+                    );
+                    let scope = match change_kind {
+                        "single_page" => RebuildScope::SinglePage,
+                        "assets_only" => RebuildScope::AssetsOnly,
+                        "template" => RebuildScope::Template,
+                        "mixed" => RebuildScope::Mixed,
+                        _ => RebuildScope::Full,
+                    };
+                    if let Err(err) = run_build_scoped(&build, scope) {
                         eprintln!("rebuild failed: {err:#}");
                     } else {
-                        println!("rebuild succeeded");
+                        println!(
+                            "{{\"stage\":\"watch_rebuild_finish\",\"change_kind\":\"{}\",\"status\":\"ok\"}}",
+                            change_kind
+                        );
                     }
                 }
                 Ok(Err(err)) => eprintln!("watch error: {err:#}"),
@@ -1058,6 +1148,35 @@ fn spawn_watch_thread(build: BuildArgs) -> Result<()> {
         }
     });
     Ok(())
+}
+
+fn classify_watch_change(build: &BuildArgs, changed: &[PathBuf]) -> &'static str {
+    if changed.is_empty() {
+        return "unknown";
+    }
+    let is_template = changed.iter().any(|path| {
+        path.extension().and_then(|ext| ext.to_str()) == Some("html")
+            && (build
+                .template_dir
+                .as_ref()
+                .map(|dir| path.starts_with(dir))
+                .unwrap_or(false)
+                || path.to_string_lossy().contains(".nanoss/themes/"))
+    });
+    if is_template {
+        return "template";
+    }
+    let md_paths: Vec<&PathBuf> = changed
+        .iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect();
+    if md_paths.len() == 1 && changed.len() == 1 {
+        return "single_page";
+    }
+    if md_paths.is_empty() {
+        return "assets_only";
+    }
+    "mixed"
 }
 
 fn handle_static_request(request: tiny_http::Request, output_dir: &Path, mount_path: &str) -> Result<()> {
