@@ -10,20 +10,23 @@
      - `transform_markdown`
      - `on_page_ir`
      - `on_post_render`
-   - Render markdown -> HTML with TOC, anchors, and syntax highlighting.
+  - Expand content shortcodes (`{{< component ... >}}`) into safe HTML/island placeholders.
+  - Render markdown -> HTML with TOC, anchors, and syntax highlighting.
    - Compile islands and inject runtime when needed.
-   - Include `content/data` files into template context (`data`).
+  - Include local `content/data` files and remote JSON data sources into template context (`data`).
+  - Inject image helper data (`images`) and locale alternates (`alternates`) into template context.
 3. For assets:
    - Sass -> CSS with `grass`, then optimize with `LightningCSS`.
    - CSS optimize with `LightningCSS`.
    - JS/TS via backend abstraction (`passthrough` or `esbuild`).
+  - Images: copy original + optional resized `webp`/`avif` variants.
    - Optional Tailwind generation (`standalone` or `rswind` backend).
 4. Optional post steps:
    - External link checking.
    - Semantic index generation.
    - Content organization outputs (posts pagination, tags, categories).
    - SEO outputs (`sitemap.xml`, `rss.xml`).
-5. Persist build cache to `public/.nanoss-cache.json`.
+5. Persist build cache to `public/.nanoss-cache.json` (including image metadata and variants).
 
 ## Key crates
 

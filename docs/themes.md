@@ -6,6 +6,8 @@ Nanoss themes live in `.nanoss/themes/<name>`.
 
 - `theme.toml`
 - `templates/page.html`
+- `templates/*.html` (optional additional template entries, e.g. `post.html`)
+- `templates/partials/*.html` (optional partials)
 - `static/` (optional assets copied to output)
 
 Template resolution order:
@@ -13,6 +15,8 @@ Template resolution order:
 1. site template directory (`--template-dir`)
 2. active theme template (`.nanoss/themes/<name>/templates/page.html`)
 3. built-in default template
+
+Additional templates follow the same precedence rules (site template dir overrides theme templates).
 
 Static asset precedence:
 

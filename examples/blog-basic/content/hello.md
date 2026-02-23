@@ -1,6 +1,7 @@
 ---
 title: Hello Nanoss
 slug: hello-nanoss
+template: page.html
 ---
 
 # Hello Nanoss
@@ -18,3 +19,7 @@ fn main() {
 <div class="flex text-red-500">Tailwind probe</div>
 
 <island name="counter" props='{"count":1}'></island>
+
+{{< alert text="Rendered by component shortcode" >}}
+
+{{< counter mode="island" start="2" >}}

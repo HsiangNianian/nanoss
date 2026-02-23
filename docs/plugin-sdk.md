@@ -14,6 +14,13 @@
 
 - `host.log(level, message)` is provided by nanoss host.
 - Suggested levels: `debug`, `info`, `warn`, `error`.
+- Host now emits structured log fields: `plugin`, `hook`, `duration_ms`, `status`.
+
+## Payload evolution
+
+- v1 hooks continue to use JSON string payloads.
+- `plugin.wit` includes a v2 typed payload draft (`page-ir-v2`) for forward evolution.
+- Migration strategy: keep v1 hook signatures stable while gradually adding typed host-side IR.
 
 ## Compatibility rules
 
