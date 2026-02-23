@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -20,14 +20,20 @@ use once_cell::sync::Lazy;
 use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use rayon::prelude::*;
-use rswind::create_processor;
-use reqwest::blocking::Client;
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
 use walkdir::WalkDir;
+
+mod assets;
+mod build;
+mod cache;
+mod data;
+mod ports;
+mod render;
+mod seo;
 
 const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
 <html lang="en">
@@ -132,6 +138,69 @@ pub enum BuildScope {
     AssetsOnly { paths: Vec<PathBuf> },
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    #[serde(default)]
+    pub plugins: ProjectPluginsConfig,
+    #[serde(default)]
+    pub theme: ProjectThemeConfig,
+    #[serde(default)]
+    pub build: ProjectBuildConfig,
+    #[serde(default)]
+    pub server: ProjectServerConfig,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectPluginsConfig {
+    #[serde(default)]
+    pub enabled: BTreeSet<String>,
+    #[serde(default)]
+    pub config: Option<toml::Value>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectThemeConfig {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectBuildConfig {
+    pub base_path: Option<String>,
+    pub site_domain: Option<String>,
+    #[serde(default)]
+    pub images: ProjectBuildImagesConfig,
+    #[serde(default)]
+    pub data_sources: BTreeMap<String, RemoteDataSourceConfig>,
+    #[serde(default)]
+    pub i18n: ProjectI18nConfig,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectBuildImagesConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub generate_webp: bool,
+    #[serde(default)]
+    pub generate_avif: bool,
+    #[serde(default)]
+    pub widths: Vec<u32>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectI18nConfig {
+    #[serde(default)]
+    pub locales: Vec<String>,
+    pub default_locale: Option<String>,
+    #[serde(default)]
+    pub prefix_default_locale: bool,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ProjectServerConfig {
+    pub mount_path: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ImageBuildConfig {
     pub enabled: bool,
@@ -162,6 +231,10 @@ pub struct RemoteDataSourceConfig {
 
 fn default_remote_data_method() -> String {
     "GET".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -211,13 +284,6 @@ struct FrontMatter {
     tags: Option<Vec<String>>,
     categories: Option<Vec<String>>,
     template: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PageIr {
-    title: String,
-    content_html: String,
-    toc_html: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -592,42 +658,11 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 }
 
 fn scope_paths_set(scope: &BuildScope) -> HashSet<String> {
-    let mut set = HashSet::new();
-    match scope {
-        BuildScope::SinglePage { path } => {
-            set.insert(normalize_fs_path(path));
-        }
-        BuildScope::AssetsOnly { paths } => {
-            for path in paths {
-                set.insert(normalize_fs_path(path));
-            }
-        }
-        BuildScope::Full => {}
-    }
-    set
+    build::scope_paths_set(scope)
 }
 
 fn scope_includes_entry(scope: &BuildScope, scope_paths: &HashSet<String>, path: &Path) -> bool {
-    match scope {
-        BuildScope::Full => true,
-        BuildScope::SinglePage { .. } => {
-            path.extension().and_then(OsStr::to_str) == Some("md")
-                && scope_paths.contains(&normalize_fs_path(path))
-        }
-        BuildScope::AssetsOnly { .. } => {
-            path.extension().and_then(OsStr::to_str) != Some("md")
-                && scope_paths.contains(&normalize_fs_path(path))
-        }
-    }
-}
-
-fn normalize_fs_path(path: &Path) -> String {
-    let raw = if path.exists() {
-        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        path.to_path_buf()
-    };
-    raw.to_string_lossy().replace('\\', "/")
+    build::scope_includes_entry(scope, scope_paths, path)
 }
 
 fn log_build_event(stage: &str, payload: serde_json::Value) {
@@ -659,63 +694,7 @@ fn render_markdown_file(
     config: &BuildConfig,
     base_path: &str,
 ) -> Result<RenderedPage> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read markdown file {}", path.display()))?;
-    let transformed_raw = plugin_host
-        .transform_markdown(&path.display().to_string(), raw)
-        .with_context(|| format!("plugin transform_markdown failed for {}", path.display()))?;
-    let (frontmatter, markdown) = parse_frontmatter(&transformed_raw).with_context(|| {
-        format!("failed to parse frontmatter for {}", path.display())
-    })?;
-
-    let expanded_markdown = expand_component_shortcodes(markdown);
-    let (html_content, toc_items) = markdown_to_html(&expanded_markdown);
-    let title = frontmatter
-        .title
-        .clone()
-        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))
-        .unwrap_or_else(|| "Untitled".to_string());
-    let ir = PageIr {
-        title,
-        content_html: html_content,
-        toc_html: build_toc_html(&toc_items),
-    };
-    let ir_json = serde_json::to_string(&ir).context("failed to serialize page ir")?;
-    let transformed_ir_json = plugin_host
-        .on_page_ir(&path.display().to_string(), ir_json)
-        .with_context(|| format!("plugin on_page_ir failed for {}", path.display()))?;
-    let transformed_ir: PageIr =
-        serde_json::from_str(&transformed_ir_json).context("plugin returned invalid page ir json")?;
-
-    let template_name = resolve_template_name(path, &frontmatter, templates);
-    let tmpl = env
-        .get_template(&template_name)
-        .with_context(|| format!("missing template {}", template_name))?;
-    let image_helpers = build_page_image_helpers(path, markdown, config, base_path)?;
-    let alternates = build_i18n_alternates(path, &frontmatter, config, base_path)?;
-    let rendered_html = tmpl
-        .render(context! {
-            title => transformed_ir.title,
-            content => transformed_ir.content_html,
-            toc => transformed_ir.toc_html,
-            data => data_context,
-            images => image_helpers,
-            alternates => alternates,
-            locale => frontmatter.lang.clone().or_else(|| config.i18n.default_locale.clone()).unwrap_or_else(|| "und".to_string()),
-            base_path => base_path,
-            base_href_prefix => base_href_prefix(base_path)
-        })
-        .context("failed to render page template")?;
-    let html = plugin_host
-        .on_post_render(&path.display().to_string(), rendered_html)
-        .with_context(|| format!("plugin on_post_render failed for {}", path.display()))?;
-    let html = rewrite_html_absolute_links_with_base_path(&html, base_path);
-
-    Ok(RenderedPage {
-        slug: frontmatter.slug,
-        lang: frontmatter.lang,
-        html,
-    })
+    render::render_markdown_file(path, env, templates, plugin_host, data_context, config, base_path)
 }
 
 fn load_templates(template_dir: Option<&Path>, theme_dir: Option<&Path>) -> Result<HashMap<String, String>> {
@@ -1272,107 +1251,11 @@ fn process_script_asset(
     backend: JsBackend,
     timeout_secs: u64,
 ) -> Result<()> {
-    let rel = source
-        .strip_prefix(content_root)
-        .with_context(|| format!("{} is not inside {}", source.display(), content_root.display()))?;
-    let mut target = output_root.join(rel);
-    if source.extension().and_then(OsStr::to_str) == Some("ts") {
-        target.set_extension("js");
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
-
-    match backend {
-        JsBackend::Passthrough => {
-            fs::copy(source, &target)
-                .with_context(|| format!("failed to copy script {} -> {}", source.display(), target.display()))?;
-        }
-        JsBackend::Esbuild => {
-            ensure_binary_name_safe("esbuild")?;
-            let mut cmd = Command::new("esbuild");
-            let mut child = cmd
-                .arg(source)
-                .arg("--bundle")
-                .arg("--minify")
-                .arg("--outfile")
-                .arg(&target)
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-                .with_context(|| format!("failed to execute esbuild for {}", source.display()))?;
-            let status = wait_child_with_timeout(&mut child, timeout_secs)
-                .with_context(|| format!("esbuild timeout for {}", source.display()))?;
-            if !status.success() {
-                bail!("esbuild failed for {}", source.display());
-            }
-        }
-    }
-    Ok(())
+    assets::process_script_asset(source, content_root, output_root, backend, timeout_secs)
 }
 
 fn run_tailwind(config: &TailwindConfig, content_dir: &Path, timeout_secs: u64) -> Result<()> {
-    match config.backend {
-        TailwindBackend::Standalone => run_tailwind_standalone(config, timeout_secs),
-        TailwindBackend::Rswind => run_tailwind_rswind(config, content_dir),
-    }
-}
-
-fn run_tailwind_standalone(config: &TailwindConfig, timeout_secs: u64) -> Result<()> {
-    ensure_binary_name_safe(&config.binary)?;
-    if let Some(parent) = config.output_css.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
-    }
-    let mut cmd = Command::new(&config.binary);
-    cmd.arg("-i")
-        .arg(&config.input_css)
-        .arg("-o")
-        .arg(&config.output_css);
-    if config.minify {
-        cmd.arg("--minify");
-    }
-    let mut child = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to execute {}", config.binary))?;
-    let status = wait_child_with_timeout(&mut child, timeout_secs)
-        .with_context(|| format!("{} timed out", config.binary))?;
-    if !status.success() {
-        bail!("tailwind standalone compile failed");
-    }
-    Ok(())
-}
-
-fn run_tailwind_rswind(config: &TailwindConfig, content_dir: &Path) -> Result<()> {
-    if let Some(parent) = config.output_css.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create tailwind output parent {}", parent.display()))?;
-    }
-
-    let mut classes = Vec::new();
-    for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let raw = fs::read_to_string(entry.path()).unwrap_or_default();
-        for cap in CLASS_ATTR_RE.captures_iter(&raw) {
-            if let Some(group) = cap.get(1) {
-                classes.extend(group.as_str().split_whitespace().map(ToOwned::to_owned));
-            }
-        }
-    }
-
-    let mut processor = create_processor();
-    let mut css = processor.run_with(classes.iter());
-    if config.minify {
-        css = optimize_css(&config.output_css, &css)?;
-    }
-    fs::write(&config.output_css, css)
-        .with_context(|| format!("failed to write rswind output {}", config.output_css.display()))?;
-    Ok(())
+    assets::run_tailwind(config, content_dir, timeout_secs)
 }
 
 fn heading_text(events: &[Event<'_>]) -> String {
@@ -1629,11 +1512,7 @@ struct LinkCheckReport {
 }
 
 fn check_external_links(output_root: &Path) -> Result<LinkCheckReport> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("nanoss-link-checker/0.1.0")
-        .build()
-        .context("failed to create HTTP client for link checker")?;
+    let http = ports::StdHttpPort;
 
     let mut links = HashSet::new();
     for entry in WalkDir::new(output_root).into_iter().filter_map(Result::ok) {
@@ -1655,7 +1534,7 @@ fn check_external_links(output_root: &Path) -> Result<LinkCheckReport> {
     let mut report = LinkCheckReport::default();
     for link in links {
         report.checked += 1;
-        let status = check_url_status(&client, &link);
+        let status = check_url_status(&http, &link);
         if status.is_none() || status.unwrap() >= 400 {
             report.broken += 1;
             eprintln!("broken external link: {link}");
@@ -1665,55 +1544,23 @@ fn check_external_links(output_root: &Path) -> Result<LinkCheckReport> {
     Ok(report)
 }
 
-fn check_url_status(client: &Client, url: &str) -> Option<u16> {
-    let head_status = request_status(client, Method::HEAD, url);
+fn check_url_status(http: &dyn ports::HttpPort, url: &str) -> Option<u16> {
+    let head_status = request_status(http, Method::HEAD, url);
     match head_status {
         Some(code) if code == StatusCode::METHOD_NOT_ALLOWED.as_u16() => {
-            request_status(client, Method::GET, url)
+            request_status(http, Method::GET, url)
         }
         Some(code) => Some(code),
-        None => request_status(client, Method::GET, url),
+        None => request_status(http, Method::GET, url),
     }
 }
 
 fn load_build_cache(path: &Path) -> Result<BuildCache> {
-    if !path.exists() {
-        return Ok(BuildCache::default());
-    }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read build cache {}", path.display()))?;
-    match serde_json::from_str(&raw) {
-        Ok(cache) => {
-            let cache: BuildCache = cache;
-            if cache.schema_version != BUILD_CACHE_SCHEMA_VERSION {
-                eprintln!(
-                    "warning: cache schema mismatch {} != {}, resetting cache",
-                    cache.schema_version, BUILD_CACHE_SCHEMA_VERSION
-                );
-                Ok(BuildCache::default())
-            } else {
-                Ok(cache)
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "warning: invalid build cache {}, resetting cache: {}",
-                path.display(),
-                err
-            );
-            Ok(BuildCache::default())
-        }
-    }
+    cache::load_build_cache(path)
 }
 
 fn save_build_cache(path: &Path, cache: &BuildCache) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create build cache parent {}", parent.display()))?;
-    }
-    let json = serde_json::to_string_pretty(cache).context("failed to serialize build cache")?;
-    fs::write(path, json).with_context(|| format!("failed to write build cache {}", path.display()))?;
-    Ok(())
+    cache::save_build_cache(path, cache)
 }
 
 fn compute_template_dependency_hash(
@@ -1933,12 +1780,8 @@ fn embed_text_lightweight(text: &str, dims: usize) -> Vec<f32> {
     vec
 }
 
-fn request_status(client: &Client, method: Method, url: &str) -> Option<u16> {
-    client
-        .request(method, url)
-        .send()
-        .ok()
-        .map(|response| response.status().as_u16())
+fn request_status(http: &dyn ports::HttpPort, method: Method, url: &str) -> Option<u16> {
+    http.request_status(method, url, 10, "nanoss-link-checker/0.1.0")
 }
 
 fn load_data_context(
@@ -1946,97 +1789,7 @@ fn load_data_context(
     output_dir: &Path,
     remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
 ) -> Result<serde_json::Value> {
-    let data_dir = content_dir.join("data");
-    let mut root = serde_json::Map::new();
-    if data_dir.exists() {
-        for entry in WalkDir::new(&data_dir).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel = entry
-                .path()
-                .strip_prefix(&data_dir)
-                .with_context(|| format!("failed to relativize data file {}", entry.path().display()))?;
-            let key = rel
-                .with_extension("")
-                .to_string_lossy()
-                .replace(['/', '\\'], ".");
-            let raw = fs::read_to_string(entry.path())
-                .with_context(|| format!("failed to read data file {}", entry.path().display()))?;
-            let value = match entry.path().extension().and_then(OsStr::to_str) {
-                Some("json") => serde_json::from_str(&raw)
-                    .with_context(|| format!("failed to parse json data {}", entry.path().display()))?,
-                Some("yaml") | Some("yml") => serde_yaml::from_str::<serde_json::Value>(&raw)
-                    .with_context(|| format!("failed to parse yaml data {}", entry.path().display()))?,
-                Some("toml") => {
-                    let toml_value: toml::Value = toml::from_str(&raw)
-                        .with_context(|| format!("failed to parse toml data {}", entry.path().display()))?;
-                    serde_json::to_value(toml_value).context("failed to convert toml data to json value")?
-                }
-                _ => continue,
-            };
-            root.insert(key, value);
-        }
-    }
-    let remote = fetch_remote_data_sources(output_dir, remote_sources)?;
-    for (key, value) in remote {
-        root.insert(key, value);
-    }
-    Ok(serde_json::Value::Object(root))
-}
-
-fn fetch_remote_data_sources(
-    output_dir: &Path,
-    remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
-) -> Result<BTreeMap<String, serde_json::Value>> {
-    if remote_sources.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let cache_dir = output_dir.join(".nanoss-cache").join("remote-data");
-    fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("failed to create remote data cache dir {}", cache_dir.display()))?;
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("nanoss-remote-data/0.1")
-        .build()
-        .context("failed to build remote data client")?;
-
-    let mut resolved = BTreeMap::new();
-    for (key, source) in remote_sources {
-        let cache_file = cache_dir.join(format!("{key}.json"));
-        let method = source.method.to_uppercase();
-        let mut loaded = None;
-        if method == "GET" {
-            if let Ok(resp) = client.get(&source.url).send() {
-                if let Ok(ok_resp) = resp.error_for_status() {
-                    let value = serde_json::from_str::<serde_json::Value>(
-                        &ok_resp
-                            .text()
-                            .with_context(|| format!("failed to read remote payload for source '{}'", key))?,
-                    )
-                    .with_context(|| format!("failed to decode remote json for source '{}'", key))?;
-                    fs::write(&cache_file, serde_json::to_vec_pretty(&value)?)
-                        .with_context(|| format!("failed to persist remote data cache {}", cache_file.display()))?;
-                    loaded = Some(value);
-                }
-            }
-        }
-        if loaded.is_none() && cache_file.exists() {
-            let cached = fs::read_to_string(&cache_file)
-                .with_context(|| format!("failed to read cached remote data {}", cache_file.display()))?;
-            loaded = Some(
-                serde_json::from_str(&cached)
-                    .with_context(|| format!("failed to parse cached remote data {}", cache_file.display()))?,
-            );
-        }
-        if let Some(value) = loaded {
-            resolved.insert(key.clone(), value);
-        } else if source.fail_fast {
-            bail!("remote data source '{}' failed and no cache is available", key);
-        }
-    }
-    Ok(resolved)
+    data::load_data_context(content_dir, output_dir, remote_sources)
 }
 
 fn collect_content_entries(
@@ -2185,37 +1938,7 @@ fn write_taxonomy_pages(
 }
 
 fn generate_sitemap_and_feed(entries: &[ContentEntry], output_dir: &Path, site_domain: Option<&str>) -> Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let mut sitemap =
-        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">");
-    for item in entries {
-        sitemap.push_str(&format!(
-            "<url><loc>{}</loc></url>",
-            canonicalize_site_url(&item.url, site_domain)
-        ));
-    }
-    sitemap.push_str("</urlset>");
-    fs::write(output_dir.join("sitemap.xml"), sitemap).context("failed to write sitemap.xml")?;
-
-    let mut rss = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>Nanoss Feed</title>",
-    );
-    for item in entries.iter().take(20) {
-        rss.push_str(&format!(
-            "<item><title>{}</title><link>{}</link>{}</item>",
-            item.title,
-            canonicalize_site_url(&item.url, site_domain),
-            item.date
-                .as_ref()
-                .map(|date| format!("<pubDate>{}</pubDate>", date))
-                .unwrap_or_default()
-        ));
-    }
-    rss.push_str("</channel></rss>");
-    fs::write(output_dir.join("rss.xml"), rss).context("failed to write rss.xml")?;
-    Ok(())
+    seo::generate_sitemap_and_feed(entries, output_dir, site_domain)
 }
 
 fn validate_build_config(config: &BuildConfig) -> Result<()> {
