@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nanoss_core::{
-    build_site, BuildConfig, I18nConfig, ImageBuildConfig, JsBackend, RemoteDataSourceConfig,
+    build_site, BuildConfig, BuildScope, I18nConfig, ImageBuildConfig, JsBackend, RemoteDataSourceConfig,
     TailwindBackend, TailwindConfig,
 };
 use notify::{RecursiveMode, Watcher};
@@ -367,6 +367,10 @@ fn prompt_new_kind<R: BufRead, W: Write>(name: &str, mut input: R, mut output: W
 }
 
 fn run_build(args: &BuildArgs) -> Result<()> {
+    run_build_with_scope(args, BuildScope::Full)
+}
+
+fn run_build_with_scope(args: &BuildArgs, build_scope: BuildScope) -> Result<()> {
     let config = load_project_config()?;
     let base_path = args
         .base_path
@@ -458,6 +462,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
             default_locale: config.build.i18n.default_locale.clone(),
             prefix_default_locale: config.build.i18n.prefix_default_locale,
         },
+        build_scope,
     })?;
     println!(
         "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, processed {} images, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
@@ -514,9 +519,21 @@ enum RebuildScope {
     Mixed,
 }
 
-fn run_build_scoped(args: &BuildArgs, scope: RebuildScope) -> Result<()> {
+fn run_build_scoped(args: &BuildArgs, scope: RebuildScope, changed: &[PathBuf]) -> Result<()> {
     println!("{{\"stage\":\"rebuild_scope\",\"scope\":\"{:?}\"}}", scope);
-    run_build(args)
+    let build_scope = match scope {
+        RebuildScope::SinglePage => changed
+            .iter()
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+            .cloned()
+            .map(|path| BuildScope::SinglePage { path })
+            .unwrap_or(BuildScope::Full),
+        RebuildScope::AssetsOnly => BuildScope::AssetsOnly {
+            paths: changed.to_vec(),
+        },
+        RebuildScope::Template | RebuildScope::Mixed | RebuildScope::Full => BuildScope::Full,
+    };
+    run_build_with_scope(args, build_scope)
 }
 
 fn run_deploy(args: DeployArgs) -> Result<()> {
@@ -1133,7 +1150,7 @@ fn spawn_watch_thread(build: BuildArgs) -> Result<()> {
                         "mixed" => RebuildScope::Mixed,
                         _ => RebuildScope::Full,
                     };
-                    if let Err(err) = run_build_scoped(&build, scope) {
+                    if let Err(err) = run_build_scoped(&build, scope, &changed) {
                         eprintln!("rebuild failed: {err:#}");
                     } else {
                         println!(
