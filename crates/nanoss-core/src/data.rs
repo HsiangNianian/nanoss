@@ -2,12 +2,11 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use reqwest::blocking::Client;
 use walkdir::WalkDir;
 
+use crate::ports::{HttpPort, StdHttpPort};
 use crate::RemoteDataSourceConfig;
 
 pub(crate) fn load_data_context(
@@ -58,6 +57,14 @@ pub(crate) fn fetch_remote_data_sources(
     output_dir: &Path,
     remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
 ) -> Result<BTreeMap<String, serde_json::Value>> {
+    fetch_remote_data_sources_with_http(output_dir, remote_sources, &StdHttpPort)
+}
+
+pub(crate) fn fetch_remote_data_sources_with_http(
+    output_dir: &Path,
+    remote_sources: &BTreeMap<String, RemoteDataSourceConfig>,
+    http: &dyn HttpPort,
+) -> Result<BTreeMap<String, serde_json::Value>> {
     if remote_sources.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -65,30 +72,16 @@ pub(crate) fn fetch_remote_data_sources(
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create remote data cache dir {}", cache_dir.display()))?;
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("nanoss-remote-data/0.1")
-        .build()
-        .context("failed to build remote data client")?;
-
     let mut resolved = BTreeMap::new();
     for (key, source) in remote_sources {
         let cache_file = cache_dir.join(format!("{key}.json"));
         let method = source.method.to_uppercase();
         let mut loaded = None;
         if method == "GET" {
-            if let Ok(resp) = client.get(&source.url).send() {
-                if let Ok(ok_resp) = resp.error_for_status() {
-                    let value = serde_json::from_str::<serde_json::Value>(
-                        &ok_resp
-                            .text()
-                            .with_context(|| format!("failed to read remote payload for source '{}'", key))?,
-                    )
-                    .with_context(|| format!("failed to decode remote json for source '{}'", key))?;
-                    fs::write(&cache_file, serde_json::to_vec_pretty(&value)?)
-                        .with_context(|| format!("failed to persist remote data cache {}", cache_file.display()))?;
-                    loaded = Some(value);
-                }
+            if let Ok(value) = http.get_json(&source.url, 15, "nanoss-remote-data/0.1") {
+                fs::write(&cache_file, serde_json::to_vec_pretty(&value)?)
+                    .with_context(|| format!("failed to persist remote data cache {}", cache_file.display()))?;
+                loaded = Some(value);
             }
         }
         if loaded.is_none() && cache_file.exists() {
