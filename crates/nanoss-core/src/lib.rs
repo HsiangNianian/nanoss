@@ -340,8 +340,12 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 
     let mut islands_runtime_written = false;
     let mut file_count = 0usize;
+    let scope_paths = scope_paths_set(&config.build_scope);
     for entry in WalkDir::new(&config.content_dir).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() {
+            continue;
+        }
+        if !scope_includes_entry(&config.build_scope, &scope_paths, entry.path()) {
             continue;
         }
         file_count += 1;
@@ -564,14 +568,16 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
         report.ai_indexed_pages = build_semantic_index(&config.content_dir, &config.output_dir)?;
     }
 
-    let entries = collect_content_entries(
-        &config.content_dir,
-        &config.output_dir,
-        &base_path,
-        &config.i18n,
-    )?;
-    generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
-    generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
+    if !matches!(config.build_scope, BuildScope::AssetsOnly { .. }) {
+        let entries = collect_content_entries(
+            &config.content_dir,
+            &config.output_dir,
+            &base_path,
+            &config.i18n,
+        )?;
+        generate_content_organization_outputs(&entries, &config.output_dir, &env, &data_context, &base_path)?;
+        generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
+    }
 
     plugin_host.shutdown()?;
     save_build_cache(&cache_path, &build_cache)?;
@@ -583,6 +589,45 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
     }));
 
     Ok(report)
+}
+
+fn scope_paths_set(scope: &BuildScope) -> HashSet<String> {
+    let mut set = HashSet::new();
+    match scope {
+        BuildScope::SinglePage { path } => {
+            set.insert(normalize_fs_path(path));
+        }
+        BuildScope::AssetsOnly { paths } => {
+            for path in paths {
+                set.insert(normalize_fs_path(path));
+            }
+        }
+        BuildScope::Full => {}
+    }
+    set
+}
+
+fn scope_includes_entry(scope: &BuildScope, scope_paths: &HashSet<String>, path: &Path) -> bool {
+    match scope {
+        BuildScope::Full => true,
+        BuildScope::SinglePage { .. } => {
+            path.extension().and_then(OsStr::to_str) == Some("md")
+                && scope_paths.contains(&normalize_fs_path(path))
+        }
+        BuildScope::AssetsOnly { .. } => {
+            path.extension().and_then(OsStr::to_str) != Some("md")
+                && scope_paths.contains(&normalize_fs_path(path))
+        }
+    }
+}
+
+fn normalize_fs_path(path: &Path) -> String {
+    let raw = if path.exists() {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    raw.to_string_lossy().replace('\\', "/")
 }
 
 fn log_build_event(stage: &str, payload: serde_json::Value) {
