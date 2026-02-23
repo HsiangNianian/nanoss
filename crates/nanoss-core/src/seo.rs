@@ -24,7 +24,7 @@ pub(crate) fn generate_sitemap_and_feed(
     );
     for entry in entries {
         let canonical = canonicalize_site_url(&entry.url, site_domain);
-        let title = entry.title.as_deref().unwrap_or("Untitled");
+        let title = entry.title.as_str();
         rss.push_str(&format!("<item><title>{title}</title><link>{canonical}</link></item>\n"));
     }
     rss.push_str("</channel></rss>\n");
