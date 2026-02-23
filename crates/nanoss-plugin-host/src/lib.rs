@@ -54,6 +54,12 @@ pub struct PluginHost {
     fuel_per_call: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginHostApiVersion {
+    V1Json,
+    V2TypedDraft,
+}
+
 impl PluginHost {
     pub fn new(config: PluginHostConfig) -> Result<Self> {
         validate_paths(&config.plugin_paths)?;
@@ -210,6 +216,14 @@ impl PluginHost {
 
     pub fn timeout_ms(&self) -> u64 {
         self.config.timeout_ms
+    }
+
+    pub fn supported_api_versions(&self) -> Vec<PluginHostApiVersion> {
+        let mut versions = vec![PluginHostApiVersion::V1Json];
+        if nanoss_plugin_api::PLUGIN_WIT.contains("payload-v2") {
+            versions.push(PluginHostApiVersion::V2TypedDraft);
+        }
+        versions
     }
 
 }
