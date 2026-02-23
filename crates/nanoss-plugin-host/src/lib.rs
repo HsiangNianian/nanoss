@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use wasmtime::component::{Component, Linker};
@@ -39,7 +40,11 @@ struct HostState {
 
 impl bindings::nanoss::plugin::host::Host for HostState {
     fn log(&mut self, level: String, message: String) {
-        eprintln!("[plugin:{level}] {message}");
+        eprintln!(
+            "{{\"component\":\"plugin\",\"hook\":\"host.log\",\"status\":\"{}\",\"message\":{}}}",
+            level,
+            json_string(&message)
+        );
     }
 }
 
@@ -99,6 +104,7 @@ impl PluginHost {
 
     pub fn init(&mut self, config_json: &str) -> Result<()> {
         for plugin in &mut self.plugins {
+            let started = Instant::now();
             plugin
                 .store
                 .set_fuel(self.fuel_per_call)
@@ -108,6 +114,7 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_init(&mut plugin.store, config_json)
                 .with_context(|| format!("plugin init failed: {}", plugin.name))?;
+            log_plugin_event(&plugin.name, "init", started.elapsed().as_millis(), "ok");
         }
         Ok(())
     }
@@ -115,6 +122,7 @@ impl PluginHost {
     pub fn transform_markdown(&mut self, path: &str, content: String) -> Result<String> {
         let mut next = content;
         for plugin in &mut self.plugins {
+            let started = Instant::now();
             plugin
                 .store
                 .set_fuel(self.fuel_per_call)
@@ -124,6 +132,12 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_transform_markdown(&mut plugin.store, path, &next)
                 .with_context(|| format!("plugin transform_markdown failed: {}", plugin.name))?;
+            log_plugin_event(
+                &plugin.name,
+                "transform_markdown",
+                started.elapsed().as_millis(),
+                "ok",
+            );
         }
         Ok(next)
     }
@@ -131,6 +145,7 @@ impl PluginHost {
     pub fn on_page_ir(&mut self, path: &str, ir_json: String) -> Result<String> {
         let mut next = ir_json;
         for plugin in &mut self.plugins {
+            let started = Instant::now();
             plugin
                 .store
                 .set_fuel(self.fuel_per_call)
@@ -140,6 +155,7 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_on_page_ir(&mut plugin.store, path, &next)
                 .with_context(|| format!("plugin on_page_ir failed: {}", plugin.name))?;
+            log_plugin_event(&plugin.name, "on_page_ir", started.elapsed().as_millis(), "ok");
         }
         Ok(next)
     }
@@ -147,6 +163,7 @@ impl PluginHost {
     pub fn on_post_render(&mut self, path: &str, html: String) -> Result<String> {
         let mut next = html;
         for plugin in &mut self.plugins {
+            let started = Instant::now();
             plugin
                 .store
                 .set_fuel(self.fuel_per_call)
@@ -156,12 +173,19 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_on_post_render(&mut plugin.store, path, &next)
                 .with_context(|| format!("plugin on_post_render failed: {}", plugin.name))?;
+            log_plugin_event(
+                &plugin.name,
+                "on_post_render",
+                started.elapsed().as_millis(),
+                "ok",
+            );
         }
         Ok(next)
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
         for plugin in &mut self.plugins {
+            let started = Instant::now();
             plugin
                 .store
                 .set_fuel(self.fuel_per_call)
@@ -171,6 +195,7 @@ impl PluginHost {
                 .nanoss_plugin_hooks()
                 .call_shutdown(&mut plugin.store)
                 .with_context(|| format!("plugin shutdown failed: {}", plugin.name))?;
+            log_plugin_event(&plugin.name, "shutdown", started.elapsed().as_millis(), "ok");
         }
         Ok(())
     }
@@ -219,4 +244,15 @@ fn validate_paths(paths: &[PathBuf]) -> Result<()> {
 
 fn is_component_candidate(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some("wasm")
+}
+
+fn log_plugin_event(plugin: &str, hook: &str, duration_ms: u128, status: &str) {
+    eprintln!(
+        "{{\"component\":\"plugin\",\"plugin\":\"{}\",\"hook\":\"{}\",\"duration_ms\":{},\"status\":\"{}\"}}",
+        plugin, hook, duration_ms, status
+    );
+}
+
+fn json_string(input: &str) -> String {
+    format!("\"{}\"", input.replace('\\', "\\\\").replace('"', "\\\""))
 }
