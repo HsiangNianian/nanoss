@@ -33,6 +33,15 @@ cargo run -p nanoss-cli -- build \
   --tailwind-backend rswind
 ```
 
+Feature smoke test (image variants + i18n + remote data):
+
+```bash
+cargo run -p nanoss-cli -- build \
+  --content-dir examples/blog-basic/content \
+  --template-dir examples/blog-basic/templates \
+  --output-dir public
+```
+
 ## Docs
 
 - `docs/architecture.md`
