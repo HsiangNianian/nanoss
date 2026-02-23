@@ -5,11 +5,22 @@ interface host {
 }
 
 interface hooks {
+  /// v1 JSON lifecycle (kept for backward compatibility).
   init: func(config-json: string);
   transform-markdown: func(path: string, content: string) -> string;
   on-page-ir: func(path: string, ir-json: string) -> string;
   on-post-render: func(path: string, html: string) -> string;
   shutdown: func();
+}
+
+/// v2 typed payload draft for future host/plugin negotiation.
+interface payload-v2 {
+  record page-ir-v2 {
+    path: string,
+    title: string,
+    content-html: string,
+    toc-html: string,
+  }
 }
 
 world nanoss-plugin {
