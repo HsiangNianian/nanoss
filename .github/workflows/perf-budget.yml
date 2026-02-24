@@ -1,0 +1,27 @@
+name: Performance Budget
+
+on:
+  pull_request:
+  push:
+    branches: ["main", "master"]
+
+permissions:
+  contents: read
+
+jobs:
+  perf-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build docs site
+        run: |
+          set -euo pipefail
+          cargo run -p nanoss-cli -- build \
+            --content-dir docs \
+            --template-dir docs/templates \
+            --output-dir docs-public
+      - name: Check output performance budgets
+        run: bash scripts/check_perf_budget.sh docs-public

@@ -27,9 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Build docs site from source
         run: |
+          set -euo pipefail
           rm -rf docs-public
           cargo run -p nanoss-cli -- build \
             --content-dir docs \

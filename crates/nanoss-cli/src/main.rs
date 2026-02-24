@@ -12,6 +12,7 @@ use nanoss_core::{
     build_site, BuildConfig, BuildScope, I18nConfig, ImageBuildConfig, JsBackend, ProjectConfig,
     TailwindBackend, TailwindConfig,
 };
+use nanoss_metrics::StdoutMetricsCollector;
 use notify::{RecursiveMode, Watcher};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,8 @@ struct BuildArgs {
     base_path: Option<String>,
     #[arg(long)]
     site_domain: Option<String>,
+    #[arg(long, default_value_t = false)]
+    include_drafts: bool,
 }
 
 #[derive(Clone, Args)]
@@ -419,7 +422,8 @@ fn run_build_with_scope(args: &BuildArgs, build_scope: BuildScope) -> Result<()>
             prefix_default_locale: config.build.i18n.prefix_default_locale,
         },
         build_scope,
-        metrics: None,
+        include_drafts: args.include_drafts,
+        metrics: Some(std::sync::Arc::new(StdoutMetricsCollector)),
     })?;
     println!(
         "Built {} pages (skipped {}, {} with islands), compiled {} Sass files, copied {} assets, processed {} scripts, processed {} images, tailwind: {}, ai_indexed_pages: {}, checked {} external links ({} broken).",
@@ -1313,6 +1317,7 @@ mod tests {
             enable_ai_index: false,
             base_path: Some("/".to_string()),
             site_domain: None,
+            include_drafts: false,
         }
     }
 

@@ -11,6 +11,8 @@ use pulldown_cmark::{
     html, CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 use syntect::html::highlighted_html_for_string;
+use time::format_description::well_known::Rfc3339;
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcOffset};
 use walkdir::WalkDir;
 
 use crate::{BuildConfig, FrontMatter, RenderedPage};
@@ -45,7 +47,7 @@ pub(crate) fn render_markdown_file(
         .unwrap_or_else(|| "Untitled".to_string());
     let boundary = PluginBoundary::new(PluginApiVersion::V1Json);
     let ir = PluginPageIrV1 {
-        title,
+        title: title.clone(),
         content_html: html_content,
         toc_html: build_toc_html(&toc_items),
     };
@@ -65,6 +67,7 @@ pub(crate) fn render_markdown_file(
         .with_context(|| format!("missing template {}", template_name))?;
     let image_helpers = build_page_image_helpers(path, markdown, config, base_path)?;
     let alternates = build_i18n_alternates(path, &frontmatter, config, base_path)?;
+    let seo = build_seo_context(path, &frontmatter, &title, config, base_path)?;
     let rendered_html = tmpl
         .render(context! {
             title => transformed_ir.title,
@@ -74,6 +77,7 @@ pub(crate) fn render_markdown_file(
             images => image_helpers,
             alternates => alternates,
             locale => frontmatter.lang.clone().or_else(|| config.i18n.default_locale.clone()).unwrap_or_else(|| "und".to_string()),
+            seo => seo,
             base_path => base_path,
             base_href_prefix => crate::path::base_href_prefix(base_path)
         })
@@ -83,11 +87,7 @@ pub(crate) fn render_markdown_file(
         .with_context(|| format!("plugin on_post_render failed for {}", path.display()))?;
     let html = crate::path::rewrite_html_absolute_links_with_base_path(&html, base_path);
 
-    Ok(RenderedPage {
-        slug: frontmatter.slug,
-        lang: frontmatter.lang,
-        html,
-    })
+    Ok(RenderedPage { html })
 }
 
 pub(crate) fn load_templates(
@@ -426,6 +426,177 @@ pub(crate) fn build_i18n_alternates(
         }));
     }
     Ok(alternates)
+}
+
+pub(crate) fn should_render_content(
+    frontmatter: &FrontMatter,
+    include_drafts: bool,
+) -> Result<bool> {
+    if frontmatter.draft.unwrap_or(false) && !include_drafts {
+        return Ok(false);
+    }
+    let publish_value = frontmatter
+        .publish_at
+        .as_deref()
+        .or(frontmatter.date.as_deref());
+    if let Some(raw) = publish_value {
+        let reached = is_publish_time_reached(raw)?;
+        if !include_drafts {
+            return Ok(reached);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn is_publish_time_reached(raw: &str) -> Result<bool> {
+    let now = OffsetDateTime::now_utc();
+    let value = raw.trim();
+    if let Ok(date_time) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Ok(date_time <= now);
+    }
+    if let Ok(date) = parse_iso_date(value) {
+        let midnight_utc =
+            PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_offset(UtcOffset::UTC);
+        return Ok(midnight_utc <= now);
+    }
+    anyhow::bail!(
+        "publish_at/date must be RFC3339 or YYYY-MM-DD, got '{}'",
+        raw
+    );
+}
+
+fn parse_iso_date(value: &str) -> Result<Date> {
+    let mut parts = value.split('-');
+    let year = parts
+        .next()
+        .and_then(|p| p.parse::<i32>().ok())
+        .context("invalid year in YYYY-MM-DD")?;
+    let month = parts
+        .next()
+        .and_then(|p| p.parse::<u8>().ok())
+        .context("invalid month in YYYY-MM-DD")?;
+    let day = parts
+        .next()
+        .and_then(|p| p.parse::<u8>().ok())
+        .context("invalid day in YYYY-MM-DD")?;
+    if parts.next().is_some() {
+        anyhow::bail!("invalid date format, expected YYYY-MM-DD");
+    }
+    let month = Month::try_from(month).context("month out of range in YYYY-MM-DD")?;
+    Date::from_calendar_date(year, month, day).context("invalid calendar date")
+}
+
+fn build_seo_context(
+    path: &Path,
+    frontmatter: &FrontMatter,
+    title: &str,
+    config: &BuildConfig,
+    base_path: &str,
+) -> Result<serde_json::Value> {
+    let route = build_page_route(path, frontmatter, config, base_path)?;
+    let site_domain = crate::path::normalize_site_domain(config.site_domain.as_deref())?;
+    let canonical_raw = frontmatter
+        .canonical
+        .clone()
+        .unwrap_or_else(|| route.clone());
+    let canonical_raw = if canonical_raw.starts_with('/') {
+        crate::path::with_base_path(&canonical_raw, base_path)
+    } else {
+        canonical_raw
+    };
+    let canonical = crate::path::canonicalize_site_url(&canonical_raw, site_domain.as_deref());
+    let mut og_image = frontmatter.og_image.as_ref().map(|image| {
+        let with_base = if image.starts_with('/') {
+            crate::path::with_base_path(image, base_path)
+        } else {
+            image.clone()
+        };
+        crate::path::canonicalize_site_url(&with_base, site_domain.as_deref())
+    });
+    if og_image.is_none() {
+        let default_og = config.static_dir.join("og-default.png");
+        if default_og.exists() {
+            let with_base = crate::path::with_base_path("/og-default.png", base_path);
+            og_image = Some(crate::path::canonicalize_site_url(
+                &with_base,
+                site_domain.as_deref(),
+            ));
+        }
+    }
+    let description = frontmatter
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("{title} - generated by Nanoss"));
+    let twitter_card = frontmatter.twitter_card.clone().unwrap_or_else(|| {
+        if og_image.is_some() {
+            "summary_large_image"
+        } else {
+            "summary"
+        }
+        .to_string()
+    });
+    let locale = frontmatter
+        .lang
+        .clone()
+        .or_else(|| config.i18n.default_locale.clone())
+        .unwrap_or_else(|| "und".to_string());
+    let mut json_ld = serde_json::json!({
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": title,
+        "description": description,
+        "url": canonical,
+        "inLanguage": locale
+    });
+    if let Some(date) = &frontmatter.date {
+        json_ld["datePublished"] = serde_json::Value::String(date.clone());
+    }
+    if let Some(image) = &og_image {
+        json_ld["image"] = serde_json::Value::String(image.clone());
+    }
+    Ok(serde_json::json!({
+        "title": title,
+        "description": description,
+        "canonical": canonical,
+        "og_image": og_image,
+        "twitter_card": twitter_card,
+        "json_ld": serde_json::to_string(&json_ld).ok(),
+        "noindex": frontmatter.noindex.unwrap_or(false),
+    }))
+}
+
+fn build_page_route(
+    path: &Path,
+    frontmatter: &FrontMatter,
+    config: &BuildConfig,
+    base_path: &str,
+) -> Result<String> {
+    let slug = frontmatter
+        .slug
+        .clone()
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "index".to_string());
+    let locale = frontmatter
+        .lang
+        .as_deref()
+        .or(config.i18n.default_locale.as_deref());
+    let locale_prefix = crate::path::locale_prefix_for_output(locale, &config.i18n)?;
+    let route = if slug == "index" {
+        match locale_prefix {
+            Some(prefix) => format!("/{prefix}/"),
+            None => "/".to_string(),
+        }
+    } else {
+        match locale_prefix {
+            Some(prefix) => format!("/{prefix}/{slug}/"),
+            None => format!("/{slug}/"),
+        }
+    };
+    Ok(crate::path::with_base_path(&route, base_path))
 }
 
 pub(crate) fn heading_text(events: &[Event<'_>]) -> String {

@@ -132,6 +132,7 @@ fn organization_pages_use_theme_template() -> Result<()> {
         remote_data_sources: BTreeMap::new(),
         i18n: I18nConfig::default(),
         build_scope: BuildScope::Full,
+        include_drafts: false,
         metrics: None,
     };
 
@@ -265,5 +266,60 @@ fn process_image_asset_generates_webp_variant() -> Result<()> {
     for variant in &record.variants {
         assert!(PathBuf::from(&variant.output).exists());
     }
+    Ok(())
+}
+
+#[test]
+fn build_skips_drafts_by_default() -> Result<()> {
+    let root = tempdir().context("failed to create root")?;
+    let content = root.path().join("content");
+    let static_dir = root.path().join("static");
+    let output = root.path().join("public");
+    fs::create_dir_all(&content).context("failed to create content")?;
+    fs::create_dir_all(&static_dir).context("failed to create static")?;
+    fs::write(
+        content.join("draft.md"),
+        "---\ntitle: Draft\ndraft: true\nslug: draft\n---\n\nHidden",
+    )
+    .context("failed to write draft")?;
+    fs::write(
+        content.join("live.md"),
+        "---\ntitle: Live\nslug: live\n---\n\nVisible",
+    )
+    .context("failed to write live")?;
+
+    let config = BuildConfig {
+        content_dir: content,
+        static_dir,
+        output_dir: output.clone(),
+        template_dir: None,
+        theme_dir: None,
+        plugin_paths: Vec::new(),
+        plugin_init_config_json: "{}".to_string(),
+        plugin_timeout_ms: 2_000,
+        plugin_memory_limit_mb: 128,
+        check_external_links: false,
+        fail_on_broken_links: false,
+        js_backend: JsBackend::Passthrough,
+        tailwind: None,
+        enable_ai_index: false,
+        max_frontmatter_bytes: 64 * 1024,
+        max_file_bytes: 10 * 1024 * 1024,
+        max_total_files: 100_000,
+        command_timeout_secs: 120,
+        base_path: "/".to_string(),
+        site_domain: None,
+        images: ImageBuildConfig::default(),
+        remote_data_sources: BTreeMap::new(),
+        i18n: I18nConfig::default(),
+        build_scope: BuildScope::Full,
+        include_drafts: false,
+        metrics: None,
+    };
+
+    build_site(&config)?;
+    assert!(output.join("live/index.html").exists());
+    assert!(!output.join("draft/index.html").exists());
+    assert!(output.join("robots.txt").exists());
     Ok(())
 }

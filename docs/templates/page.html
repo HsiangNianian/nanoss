@@ -3,10 +3,31 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="{{ seo.description }}" />
+    <link rel="canonical" href="{{ seo.canonical }}" />
+    <meta property="og:title" content="{{ seo.title }}" />
+    <meta property="og:description" content="{{ seo.description }}" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="{{ seo.canonical }}" />
+    {% if seo.og_image %}
+    <meta property="og:image" content="{{ seo.og_image }}" />
+    {% endif %}
+    <meta name="twitter:card" content="{{ seo.twitter_card }}" />
+    <meta name="twitter:title" content="{{ seo.title }}" />
+    <meta name="twitter:description" content="{{ seo.description }}" />
+    {% if seo.og_image %}
+    <meta name="twitter:image" content="{{ seo.og_image }}" />
+    {% endif %}
+    {% if seo.noindex %}
+    <meta name="robots" content="noindex,nofollow" />
+    {% endif %}
     <title>{{ title }} | Nanoss Docs</title>
     {% for alt in alternates %}
     <link rel="alternate" hreflang="{{ alt.locale }}" href="{{ alt.url }}" />
     {% endfor %}
+    {% if seo.json_ld %}
+    <script type="application/ld+json">{{ seo.json_ld | safe }}</script>
+    {% endif %}
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">

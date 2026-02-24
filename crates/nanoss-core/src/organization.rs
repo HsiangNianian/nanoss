@@ -14,6 +14,7 @@ pub(crate) fn collect_content_entries(
     output_dir: &Path,
     base_path: &str,
     i18n: &I18nConfig,
+    include_drafts: bool,
 ) -> Result<Vec<ContentEntry>> {
     let mut entries = Vec::new();
     for entry in WalkDir::new(content_dir).into_iter().filter_map(Result::ok) {
@@ -26,6 +27,9 @@ pub(crate) fn collect_content_entries(
             .with_context(|| format!("failed to read content entry {}", entry.path().display()))?;
         let (fm, _) = crate::render::parse_frontmatter(&raw)
             .with_context(|| format!("failed to parse content entry {}", entry.path().display()))?;
+        if !crate::render::should_render_content(&fm, include_drafts)? {
+            continue;
+        }
         let output = crate::path::output_path_for(
             entry.path(),
             content_dir,
@@ -80,6 +84,15 @@ pub(crate) fn render_organization_page(
             images => serde_json::json!({"list": []}),
             alternates => Vec::<serde_json::Value>::new(),
             locale => "und",
+            seo => serde_json::json!({
+                "title": title,
+                "description": title,
+                "canonical": crate::path::with_base_path("/", base_path),
+                "og_image": serde_json::Value::Null,
+                "twitter_card": "summary",
+                "json_ld": serde_json::Value::Null,
+                "noindex": false
+            }),
             base_path => base_path,
             base_href_prefix => crate::path::base_href_prefix(base_path)
         })

@@ -36,10 +36,31 @@ const DEFAULT_PAGE_TEMPLATE: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="{{ seo.description }}" />
+  <link rel="canonical" href="{{ seo.canonical }}" />
+  <meta property="og:title" content="{{ seo.title }}" />
+  <meta property="og:description" content="{{ seo.description }}" />
+  <meta property="og:type" content="article" />
+  <meta property="og:url" content="{{ seo.canonical }}" />
+  {% if seo.og_image %}
+  <meta property="og:image" content="{{ seo.og_image }}" />
+  {% endif %}
+  <meta name="twitter:card" content="{{ seo.twitter_card }}" />
+  <meta name="twitter:title" content="{{ seo.title }}" />
+  <meta name="twitter:description" content="{{ seo.description }}" />
+  {% if seo.og_image %}
+  <meta name="twitter:image" content="{{ seo.og_image }}" />
+  {% endif %}
+  {% if seo.noindex %}
+  <meta name="robots" content="noindex,nofollow" />
+  {% endif %}
   <title>{{ title }}</title>
   {% for alt in alternates %}
   <link rel="alternate" hreflang="{{ alt.locale }}" href="{{ alt.url }}" />
   {% endfor %}
+  {% if seo.json_ld %}
+  <script type="application/ld+json">{{ seo.json_ld | safe }}</script>
+  {% endif %}
 </head>
 <body>
   <main>
@@ -112,6 +133,7 @@ pub struct BuildConfig {
     pub remote_data_sources: BTreeMap<String, RemoteDataSourceConfig>,
     pub i18n: I18nConfig,
     pub build_scope: BuildScope,
+    pub include_drafts: bool,
     pub metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
@@ -272,11 +294,18 @@ pub enum TailwindBackend {
 #[derive(Debug, Deserialize, Default)]
 struct FrontMatter {
     title: Option<String>,
+    description: Option<String>,
     slug: Option<String>,
     lang: Option<String>,
     date: Option<String>,
+    publish_at: Option<String>,
+    draft: Option<bool>,
     tags: Option<Vec<String>>,
     categories: Option<Vec<String>>,
+    canonical: Option<String>,
+    og_image: Option<String>,
+    twitter_card: Option<String>,
+    noindex: Option<bool>,
     template: Option<String>,
 }
 
@@ -410,6 +439,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
 
     let mut islands_runtime_written = false;
     let mut file_count = 0usize;
+    let mut seen_output_targets = HashSet::new();
     let scope_paths = scope_paths_set(&config.build_scope);
     for entry in WalkDir::new(&config.content_dir)
         .into_iter()
@@ -448,6 +478,33 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     .with_context(|| {
                         format!("frontmatter too large in {}", entry.path().display())
                     })?;
+                let (frontmatter, _) = render::parse_frontmatter(&raw).with_context(|| {
+                    format!("failed to parse frontmatter for {}", entry.path().display())
+                })?;
+                if let Some(canonical) = frontmatter.canonical.as_deref() {
+                    if canonical.trim().is_empty() {
+                        bail!("canonical cannot be empty in {}", entry.path().display());
+                    }
+                }
+                if !render::should_render_content(&frontmatter, config.include_drafts)? {
+                    report.skipped_pages += 1;
+                    continue;
+                }
+                let output_preview = path::output_path_for(
+                    entry.path(),
+                    &config.content_dir,
+                    &config.output_dir,
+                    frontmatter.slug.as_deref(),
+                    frontmatter.lang.as_deref(),
+                    &config.i18n,
+                )?;
+                let output_key = output_preview.display().to_string();
+                if !seen_output_targets.insert(output_key.clone()) {
+                    bail!(
+                        "duplicate output route detected for markdown pages: {}",
+                        output_key
+                    );
+                }
                 let current_hash = utils::compute_page_build_hash(
                     &query_db,
                     entry.path(),
@@ -473,14 +530,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     config,
                     &base_path,
                 )?;
-                let target = path::output_path_for(
-                    entry.path(),
-                    &config.content_dir,
-                    &config.output_dir,
-                    rendered.slug.as_deref(),
-                    rendered.lang.as_deref(),
-                    &config.i18n,
-                )?;
+                let target = output_preview;
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent).with_context(|| {
                         format!("failed to create parent directory {}", parent.display())
@@ -675,6 +725,7 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             &config.output_dir,
             &base_path,
             &config.i18n,
+            config.include_drafts,
         )?;
         organization::generate_content_organization_outputs(
             &entries,
@@ -684,6 +735,12 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             &base_path,
         )?;
         seo::generate_sitemap_and_feed(&entries, &config.output_dir, site_domain.as_deref())?;
+        seo::generate_robots_txt(
+            &config.output_dir,
+            site_domain.as_deref(),
+            &base_path,
+            config.include_drafts,
+        )?;
     }
 
     plugin_host.shutdown()?;
@@ -709,6 +766,12 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
             "copied_assets": report.copied_assets,
         }),
     );
+    observability::write_build_report(
+        &config.output_dir,
+        &build_id,
+        build_started.elapsed().as_millis(),
+        &report,
+    )?;
 
     Ok(report)
 }
@@ -722,8 +785,6 @@ fn scope_includes_entry(scope: &BuildScope, scope_paths: &HashSet<String>, path:
 }
 
 struct RenderedPage {
-    slug: Option<String>,
-    lang: Option<String>,
     html: String,
 }
 

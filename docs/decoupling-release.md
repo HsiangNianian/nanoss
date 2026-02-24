@@ -14,3 +14,13 @@
 - Correctly fall back to the cache file when the remote data source fails.
   The child process paths for `esbuild` and `tailwind` are still subject to timeout control.
 - The i18n output path and the `base_path` rewrite behavior remain unchanged.
+
+## Rollback runbook
+
+1. Open the latest successful CI run and download the docs artifact (`docs-public` or `docs-preview-*`).
+2. Restore to a local target with:
+   - `bash scripts/rollback_docs.sh <artifact_dir_or_archive> docs-public`
+3. Validate rollback output:
+   - `docs-public/index.html` exists
+   - `docs-public/sitemap.xml` and `docs-public/robots.txt` exist
+4. Re-deploy the restored output with your selected platform workflow.

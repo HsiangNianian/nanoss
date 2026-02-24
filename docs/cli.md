@@ -68,3 +68,4 @@ Generated templates include benchmark regression gate script execution (`scripts
 - Site static assets directory can be configured with `--static-dir` (default `static`).
 - Base path can be set with `--base-path /subpath` or `nanoss.toml` (`[build].base_path`).
 - Site domain can be set with `--site-domain https://example.com` or `nanoss.toml` (`[build].site_domain`).
+- Draft/preview pages can be included with `--include-drafts` (also makes generated `robots.txt` use `Disallow: /`).

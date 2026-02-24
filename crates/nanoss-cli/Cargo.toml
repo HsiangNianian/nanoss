@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 nanoss-core = { path = "../nanoss-core" }
+nanoss-metrics = { path = "../nanoss-metrics" }
 notify.workspace = true
 semver.workspace = true
 serde.workspace = true
