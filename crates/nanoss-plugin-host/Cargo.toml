@@ -8,4 +8,4 @@ license.workspace = true
 anyhow.workspace = true
 nanoss-plugin-api = { path = "../nanoss-plugin-api" }
 tracing.workspace = true
-wasmtime = "41.0.3"
+wasmtime = "41.0.4"
