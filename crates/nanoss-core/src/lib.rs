@@ -487,6 +487,25 @@ pub fn build_site(config: &BuildConfig) -> Result<BuildReport> {
                     }
                 }
                 if !render::should_render_content(&frontmatter, config.include_drafts)? {
+                    let excluded_output = path::output_path_for(
+                        entry.path(),
+                        &config.content_dir,
+                        &config.output_dir,
+                        frontmatter.slug.as_deref(),
+                        frontmatter.lang.as_deref(),
+                        &config.i18n,
+                    )?;
+                    if excluded_output.exists() {
+                        fs::remove_file(&excluded_output).with_context(|| {
+                            format!(
+                                "failed to remove excluded rendered page {}",
+                                excluded_output.display()
+                            )
+                        })?;
+                    }
+                    build_cache
+                        .pages
+                        .remove(&entry.path().display().to_string());
                     report.skipped_pages += 1;
                     continue;
                 }

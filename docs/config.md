@@ -45,7 +45,7 @@ config = { env = "dev", feature_flags = ["toc", "search"] }
 - `build.data_sources` fetches remote JSON and injects it into template `data` context.
 - `build.i18n` defines locale list/default locale and output prefix strategy.
 - `server.mount_path` is optional. Use it in local `dev/server` to simulate subpath hosting.
-- Priority is: CLI flag > `nanoss.toml` > default.
+- Priority is: CLI flag > `--config <path>` > `<content_dir>/../nanoss.toml` (if exists) > current-dir `nanoss.toml` > default.
   - Example: `nanoss build --base-path /docs-preview`
 - CLI override for domain: `nanoss build --site-domain https://example.com`
 - If your site is deployed at domain root, use `/` (default).

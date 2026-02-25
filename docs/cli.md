@@ -22,6 +22,7 @@ nanoss new theme my-theme
 nanoss new page docs/getting-started
 nanoss new plugin my-plugin
 nanoss new site my-site -f
+nanoss new -f site my-site
 ```
 
 If you run `nanoss new <name>`, Nanoss enters interactive mode and lets you choose `site/theme/page/plugin`.
@@ -68,4 +69,5 @@ Generated templates include benchmark regression gate script execution (`scripts
 - Site static assets directory can be configured with `--static-dir` (default `static`).
 - Base path can be set with `--base-path /subpath` or `nanoss.toml` (`[build].base_path`).
 - Site domain can be set with `--site-domain https://example.com` or `nanoss.toml` (`[build].site_domain`).
+- Project config can be pinned with `--config /path/to/nanoss.toml` (otherwise uses content dir parent config when available).
 - Draft/preview pages can be included with `--include-drafts` (also makes generated `robots.txt` use `Disallow: /`).

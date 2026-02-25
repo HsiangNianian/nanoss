@@ -1,0 +1,17 @@
+[build]
+base_path = "/"
+site_domain = "https://example.com"
+
+[build.images]
+enabled = true
+generate_webp = true
+generate_avif = false
+widths = [480, 768, 1200]
+
+[build.i18n]
+locales = ["en", "zh"]
+default_locale = "en"
+prefix_default_locale = false
+
+[server]
+# mount_path = "/nanoss"

@@ -92,6 +92,8 @@ struct BuildArgs {
     site_domain: Option<String>,
     #[arg(long, default_value_t = false)]
     include_drafts: bool,
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Clone, Args)]
@@ -143,10 +145,26 @@ struct NewArgs {
 
 #[derive(Subcommand)]
 enum NewCommand {
-    Site { name: String },
-    Theme { name: String },
-    Page { path: String },
-    Plugin { name: String },
+    Site {
+        name: String,
+        #[arg(long, short = 'f', default_value_t = false)]
+        force: bool,
+    },
+    Theme {
+        name: String,
+        #[arg(long, short = 'f', default_value_t = false)]
+        force: bool,
+    },
+    Page {
+        path: String,
+        #[arg(long, short = 'f', default_value_t = false)]
+        force: bool,
+    },
+    Plugin {
+        name: String,
+        #[arg(long, short = 'f', default_value_t = false)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,14 +271,34 @@ fn run_init(args: InitArgs) -> Result<()> {
 fn run_new(args: NewArgs) -> Result<()> {
     let force = args.force;
     match (args.kind, args.name) {
-        (Some(NewCommand::Site { name }), None) => {
-            create_new_site_scaffold(Path::new(&name), force)
-        }
-        (Some(NewCommand::Theme { name }), None) => create_theme_scaffold(&name, force),
-        (Some(NewCommand::Page { path }), None) => create_page_scaffold(&path, force),
-        (Some(NewCommand::Plugin { name }), None) => {
-            create_plugin_scaffold(Path::new("plugins"), &name, force)
-        }
+        (
+            Some(NewCommand::Site {
+                name,
+                force: sub_force,
+            }),
+            None,
+        ) => create_new_site_scaffold(Path::new(&name), force || sub_force),
+        (
+            Some(NewCommand::Theme {
+                name,
+                force: sub_force,
+            }),
+            None,
+        ) => create_theme_scaffold(&name, force || sub_force),
+        (
+            Some(NewCommand::Page {
+                path,
+                force: sub_force,
+            }),
+            None,
+        ) => create_page_scaffold(&path, force || sub_force),
+        (
+            Some(NewCommand::Plugin {
+                name,
+                force: sub_force,
+            }),
+            None,
+        ) => create_plugin_scaffold(Path::new("plugins"), &name, force || sub_force),
         (None, Some(name)) => {
             let selected = prompt_new_kind(&name, io::stdin().lock(), io::stdout())?;
             match selected {
@@ -330,7 +368,7 @@ fn run_build(args: &BuildArgs) -> Result<()> {
 
 fn run_build_with_scope(args: &BuildArgs, build_scope: BuildScope) -> Result<()> {
     tracing::info!(event_name = "cli.build.start", scope = ?build_scope);
-    let config = load_project_config()?;
+    let config = load_project_config_for_build(args)?;
     let base_path = args
         .base_path
         .clone()
@@ -823,7 +861,28 @@ fn starter_page_template() -> &'static str {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="{{ seo.description }}" />
+  <link rel="canonical" href="{{ seo.canonical }}" />
+  <meta property="og:title" content="{{ seo.title }}" />
+  <meta property="og:description" content="{{ seo.description }}" />
+  <meta property="og:type" content="article" />
+  <meta property="og:url" content="{{ seo.canonical }}" />
+  {% if seo.og_image %}
+  <meta property="og:image" content="{{ seo.og_image }}" />
+  {% endif %}
+  <meta name="twitter:card" content="{{ seo.twitter_card }}" />
+  <meta name="twitter:title" content="{{ seo.title }}" />
+  <meta name="twitter:description" content="{{ seo.description }}" />
+  {% if seo.og_image %}
+  <meta name="twitter:image" content="{{ seo.og_image }}" />
+  {% endif %}
+  {% if seo.noindex %}
+  <meta name="robots" content="noindex,nofollow" />
+  {% endif %}
   <title>{{ title }}</title>
+  {% if seo.json_ld %}
+  <script type="application/ld+json">{{ seo.json_ld | safe }}</script>
+  {% endif %}
   <link rel="stylesheet" href="{{ base_href_prefix }}/styles/site.css" />
 </head>
 <body>
@@ -1061,6 +1120,30 @@ fn load_project_config() -> Result<ProjectConfig> {
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", PROJECT_CONFIG_FILE))?;
     toml::from_str(&raw).with_context(|| format!("failed to parse {}", PROJECT_CONFIG_FILE))
+}
+
+fn load_project_config_for_build(args: &BuildArgs) -> Result<ProjectConfig> {
+    if let Some(path) = &args.config {
+        return load_project_config_from_path(path);
+    }
+    let content_candidate = args
+        .content_dir
+        .parent()
+        .map(|parent| parent.join(PROJECT_CONFIG_FILE));
+    if let Some(path) = content_candidate.as_ref().filter(|p| p.exists()) {
+        return load_project_config_from_path(path);
+    }
+    load_project_config()
+}
+
+fn load_project_config_from_path(path: &Path) -> Result<ProjectConfig> {
+    if !path.exists() {
+        return Ok(ProjectConfig::default());
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read project config {}", path.display()))?;
+    toml::from_str(&raw)
+        .with_context(|| format!("failed to parse project config {}", path.display()))
 }
 
 fn save_project_config(config: &ProjectConfig) -> Result<()> {
@@ -1318,6 +1401,7 @@ mod tests {
             base_path: Some("/".to_string()),
             site_domain: None,
             include_drafts: false,
+            config: None,
         }
     }
 
@@ -1389,6 +1473,7 @@ mod tests {
             run_new(NewArgs {
                 kind: Some(NewCommand::Site {
                     name: "demo-site".to_string(),
+                    force: false,
                 }),
                 name: None,
                 force: false,
@@ -1398,6 +1483,7 @@ mod tests {
             run_new(NewArgs {
                 kind: Some(NewCommand::Theme {
                     name: "demo-theme".to_string(),
+                    force: false,
                 }),
                 name: None,
                 force: false,
@@ -1407,6 +1493,7 @@ mod tests {
             run_new(NewArgs {
                 kind: Some(NewCommand::Page {
                     path: "guide/getting-started".to_string(),
+                    force: false,
                 }),
                 name: None,
                 force: false,
@@ -1416,6 +1503,7 @@ mod tests {
             run_new(NewArgs {
                 kind: Some(NewCommand::Plugin {
                     name: "demo-plugin".to_string(),
+                    force: false,
                 }),
                 name: None,
                 force: false,
@@ -1457,6 +1545,7 @@ mod tests {
             let err = run_new(NewArgs {
                 kind: Some(NewCommand::Site {
                     name: "demo".to_string(),
+                    force: false,
                 }),
                 name: None,
                 force: false,
@@ -1467,6 +1556,7 @@ mod tests {
             run_new(NewArgs {
                 kind: Some(NewCommand::Site {
                     name: "demo".to_string(),
+                    force: false,
                 }),
                 name: None,
                 force: true,
@@ -1489,5 +1579,38 @@ mod tests {
         );
         assert_eq!(route_for_mount("/cli.html", "/nanoss"), None);
         Ok(())
+    }
+
+    #[test]
+    fn build_prefers_content_parent_project_config() -> Result<()> {
+        with_temp_cwd(|| {
+            fs::write(
+                "nanoss.toml",
+                "[build]\nbase_path = \"/root-base\"\n\n[build.images]\nenabled = true\ngenerate_webp = false\ngenerate_avif = false\nwidths = []\n",
+            )
+            .context("failed to write root config")?;
+            create_new_site_scaffold(Path::new("examples/e2e"), false)?;
+            fs::write(
+                "examples/e2e/nanoss.toml",
+                "[build]\nbase_path = \"/\"\nsite_domain = \"https://example.com\"\n\n[build.images]\nenabled = true\ngenerate_webp = false\ngenerate_avif = false\nwidths = []\n",
+            )
+            .context("failed to write e2e config")?;
+
+            let mut args = default_build_args();
+            args.content_dir = PathBuf::from("examples/e2e/content");
+            args.template_dir = Some(PathBuf::from("examples/e2e/templates"));
+            args.output_dir = PathBuf::from("examples/e2e/public");
+            args.static_dir = PathBuf::from("examples/e2e/static");
+            args.site_domain = None;
+            run_build(&args)?;
+
+            let index = fs::read_to_string("examples/e2e/public/index.html")
+                .context("failed to read generated index")?;
+            assert!(!index.contains("root-base"));
+            let robots = fs::read_to_string("examples/e2e/public/robots.txt")
+                .context("failed to read generated robots")?;
+            assert!(robots.contains("Sitemap: https://example.com/sitemap.xml"));
+            Ok(())
+        })
     }
 }
